@@ -320,8 +320,12 @@ func uploadParts(pool *nntp.ConnectionPool, parts []*models.FilePart, postingCon
 		// Encode part
 		encoded := yencEnc.Encode(part.Data, part.FileName, part.PartNumber, len(parts))
 		
-		// Create subject
-		subject := fmt.Sprintf("%s [%d/%d] - %d bytes",
+		// Create subject using template
+		subject := postingConfig.Posting.SubjectTemplate
+		if subject == "" {
+			subject = "%s [%d/%d] - %d bytes"
+		}
+		subject = fmt.Sprintf(subject,
 			part.FileName, part.PartNumber, len(parts), part.Size)
 
 		// Upload part

@@ -118,44 +118,32 @@ Post a single file:
 ./ypost post /path/to/your/file.iso
 ```
 
-Post multiple files:
+
+
+### Flags
+
+| Flag                 | Type    | Description                               | Default                |
+|----------------------|---------|-------------------------------------------|------------------------|
+| `-g, --group`        | string  | Newsgroup to post to (e.g., `alt.binaries.multimedia`) | *none*                 |
+| `--poster-name`      | string  | Name of the poster                        | *none*                 |
+| `--poster-email`     | string  | Email address of the poster               | *none*                 |
+| `-s, --subject`      | string  | Subject template for the post             | *none*                 |
+| `--max-part-size`    | int     | Maximum size per part in bytes            | 768000 (750 KB)        |
+| `--max-line-length`  | int     | Maximum line length                        | 128                    |
+| `--par2`             | bool    | Create PAR2 recovery files                 | true                   |
+| `--sfv`              | bool    | Create SFV checksum file                    | true                   |
+| `--redundancy`       | int     | PAR2 redundancy percentage                  | 10                     |
+| `-o, --output`       | string  | Output directory                           | *none*                 |
+| `--nzb-dir`          | string  | NZB output directory                       | *none*                 |
+
+---
+
+### Example: Post with Custom Options
+
+Post a file to a specific newsgroup with a custom subject:
+
 ```bash
-./ypost post /path/to/file1.zip /path/to/file2.rar
-```
-
-Post with custom options:
-```bash
-./ypost post --newsgroup "alt.binaries.multimedia" --subject "My Custom Subject" /path/to/file.mkv
-```
-
-### Configuration Management
-
-View current configuration:
-```bash
-./ypost config show
-```
-
-Update configuration values:
-```bash
-./ypost config set nntp.connections 12
-./ypost config set posting.newsgroup "alt.binaries.movies"
-```
-
-### Advanced Options
-
-Enable verbose logging:
-```bash
-./ypost post --verbose /path/to/file.iso
-```
-
-Dry run (test without posting):
-```bash
-./ypost post --dry-run /path/to/file.iso
-```
-
-Custom output directory:
-```bash
-./ypost post --output-dir /path/to/output /path/to/file.iso
+./ypost post /path/to/your/file.iso --group "alt.binaries.multimedia"
 ```
 
 ## 🔧 Configuration Options
@@ -221,3 +209,42 @@ Logs are written to both console and file (configurable in `config.yaml`).
 ---
 
 **Ready to use immediately** - Build, configure, and start posting to Usenet with full PAR2 and SFV support!
+
+
+
+## TODO
+
+Post multiple files:
+```bash
+./ypost post /path/to/file1.zip /path/to/file2.rar
+```
+
+### Configuration Management
+
+View current configuration:
+```bash
+./ypost config show
+```
+
+Update configuration values:
+```bash
+./ypost config set nntp.connections 12
+./ypost config set posting.newsgroup "alt.binaries.movies"
+```
+
+### Advanced Options
+
+Enable verbose logging:
+```bash
+./ypost post --verbose /path/to/file.iso
+```
+
+Dry run (test without posting):
+```bash
+./ypost post --dry-run /path/to/file.iso
+```
+
+Custom output directory:
+```bash
+./ypost post --output-dir /path/to/output /path/to/file.iso
+```
