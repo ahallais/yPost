@@ -14,6 +14,7 @@ import (
 	"ypost/internal/par2"
 	"ypost/internal/sfv"
 	"ypost/internal/splitter"
+	"ypost/internal/utils"
 	"ypost/internal/yenc"
 	"ypost/pkg/models"
 )
@@ -122,33 +123,34 @@ func runPost(cmd *cobra.Command, args []string) {
 		log.Info("Using default configuration (no config file found)")
 	}
 
-	// Check if file exists
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		log.Fatal("File does not exist: %s", filePath)
-	}
+// Check if file exists
+if _, err := os.Stat(filePath); os.IsNotExist(err) {
+	log.Fatal("File does not exist: %s", filePath)
+}
 
-	// Create output directories
-	if err := os.MkdirAll(cfg.Output.OutputDir, 0755); err != nil {
-		log.Fatal("Failed to create output directory: %v", err)
-	}
-	if err := os.MkdirAll(cfg.Output.NZBDir, 0755); err != nil {
-		log.Fatal("Failed to create NZB directory: %v", err)
-	}
+// Create unified output directory with timestamp
+baseName := filepath.Base(filePath)
+unifiedOutputDir := utils.GetUnifiedOutputPath(cfg.Output.OutputDir, baseName)
 
-	// Initialize components
-	split := splitter.NewSplitter(cfg.Posting.MaxPartSize, cfg.Posting.MaxLineLength)
-	yencEnc := yenc.Encoder{}
-	nzbGen := nzb.NewGenerator(cfg.Output.NZBDir)
-	
-	var par2Gen *par2.Generator
-	var sfvGen *sfv.Generator
-	
-	if createPAR2 || cfg.Features.CreatePAR2 {
-		par2Gen = par2.NewGenerator(cfg.Output.OutputDir)
-	}
-	if createSFV || cfg.Features.CreateSFV {
-		sfvGen = sfv.NewGenerator(cfg.Output.OutputDir)
-	}
+// Ensure the unified directory exists (even if some file types are disabled)
+if err := os.MkdirAll(unifiedOutputDir, 0755); err != nil {
+	log.Fatal("Failed to create unified output directory: %v", err)
+}
+
+// Initialize components
+split := splitter.NewSplitter(cfg.Posting.MaxPartSize, cfg.Posting.MaxLineLength)
+yencEnc := yenc.Encoder{}
+nzbGen := nzb.NewGenerator(unifiedOutputDir)
+
+var par2Gen *par2.Generator
+var sfvGen *sfv.Generator
+
+if createPAR2 || cfg.Features.CreatePAR2 {
+	par2Gen = par2.NewGenerator(unifiedOutputDir)
+}
+if createSFV || cfg.Features.CreateSFV {
+	sfvGen = sfv.NewGenerator(unifiedOutputDir)
+}
 
 	// Split file into parts
 	log.Info("Splitting file: %s", filePath)
@@ -171,16 +173,21 @@ func runPost(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// Create SFV file if enabled
+	// Create SFV file for split parts if enabled
 	var sfvPath string
 	if sfvGen != nil {
 		log.Info("Creating SFV checksum file...")
-		filePaths := []string{filePath}
-		if len(par2Files) > 0 {
-			filePaths = append(filePaths, par2Files...)
-		}
 		
-		sfvPath, err = sfvGen.CreateSFV(filePaths, fmt.Sprintf("%s.sfv", filepath.Base(filePath)))
+		// Collect paths of all files to include in SFV
+		var allFilePaths []string
+		
+		// Add the original file
+		allFilePaths = append(allFilePaths, filePath)
+		
+		// Add PAR2 files
+		allFilePaths = append(allFilePaths, par2Files...)
+		
+		sfvPath, err = sfvGen.CreateSFV(allFilePaths, fmt.Sprintf("%s.sfv", filepath.Base(filePath)))
 		if err != nil {
 			log.Error("Failed to create SFV file: %v", err)
 		} else {
@@ -190,34 +197,97 @@ func runPost(cmd *cobra.Command, args []string) {
 
 	// Initialize NNTP connection pool
 	var allSegments []*models.PostSegment
+	var pool *nntp.ConnectionPool
 	
 	for _, server := range cfg.NNTP.Servers {
 		log.Info("Connecting to server: %s", server.Host)
-		pool := nntp.NewConnectionPool(&server, server.MaxConns)
+		pool = nntp.NewConnectionPool(&server, server.MaxConns)
 		
 		// Upload parts
 		segments, err := uploadParts(pool, parts, *cfg, &yencEnc, log)
 		if err != nil {
 			log.Error("Failed to upload parts: %v", err)
+			pool.CloseAll()
 			continue
 		}
 		
 		allSegments = append(allSegments, segments...)
-		pool.CloseAll()
 		break // Use first successful server
 	}
 
 	if len(allSegments) == 0 {
+		if pool != nil {
+			pool.CloseAll()
+		}
 		log.Fatal("Failed to upload any parts")
 	}
 
-	// Generate NZB file
+	// Post PAR2 files if created
+	var par2Segments []*models.PostSegment
+	if len(par2Files) > 0 {
+		log.Info("Posting PAR2 recovery files...")
+		for _, par2File := range par2Files {
+			par2Parts, err := split.SplitFile(par2File)
+			if err != nil {
+				log.Error("Failed to split PAR2 file: %v", err)
+				continue
+			}
+
+			par2FileSegments, err := uploadParts(pool, par2Parts, *cfg, &yencEnc, log)
+			if err != nil {
+				log.Error("Failed to upload PAR2 parts: %v", err)
+				continue
+			}
+
+			par2Segments = append(par2Segments, par2FileSegments...)
+		}
+	}
+
+	// Post SFV file if created
+	var sfvSegments []*models.PostSegment
+	if sfvPath != "" {
+		log.Info("Posting SFV checksum file...")
+		sfvParts, err := split.SplitFile(sfvPath)
+		if err != nil {
+			log.Error("Failed to split SFV file: %v", err)
+		} else {
+			sfvFileSegments, err := uploadParts(pool, sfvParts, *cfg, &yencEnc, log)
+			if err != nil {
+				log.Error("Failed to upload SFV parts: %v", err)
+			} else {
+				sfvSegments = sfvFileSegments
+			}
+		}
+	}
+
+	// Close the connection pool when done
+	if pool != nil {
+		pool.CloseAll()
+	}
+
+	// Collect all additional files for NZB
+	additionalFiles := make(map[string][]*models.PostSegment)
+	if len(par2Segments) > 0 {
+		additionalFiles["PAR2"] = par2Segments
+	}
+	if len(sfvSegments) > 0 {
+		additionalFiles["SFV"] = sfvSegments
+	}
+
+	// Generate NZB file with all segments including PAR2 and SFV
 	log.Info("Generating NZB file...")
-	nzbPath, err := nzbGen.Generate(filepath.Base(filePath), allSegments, cfg.Posting.Group)
+	nzbPath, err := nzbGen.Generate(filepath.Base(filePath), allSegments, cfg.Posting.Group, additionalFiles)
 	if err != nil {
 		log.Fatal("Failed to generate NZB file: %v", err)
 	}
 	log.LogNZBCreation(filePath, nzbPath)
+
+	// Move PAR2 and SFV files to the same directory as NZB
+	if err := moveGeneratedFiles(par2Files, sfvPath, filepath.Dir(nzbPath)); err != nil {
+		log.Error("Failed to move generated files: %v", err)
+	} else {
+		log.Info("Successfully moved PAR2 and SFV files to NZB directory")
+	}
 
 	log.Info("Posting completed successfully!")
 	log.Info("NZB file: %s", nzbPath)
@@ -280,4 +350,29 @@ func sumPartSizes(parts []*models.FilePart) int64 {
 		total += part.Size
 	}
 	return total
+}
+
+// moveGeneratedFiles moves PAR2 and SFV files to the NZB directory
+func moveGeneratedFiles(par2Files []string, sfvPath string, nzbDir string) error {
+	// Move PAR2 files
+	for _, par2File := range par2Files {
+		if _, err := os.Stat(par2File); err == nil {
+			destPath := filepath.Join(nzbDir, filepath.Base(par2File))
+			if err := os.Rename(par2File, destPath); err != nil {
+				return fmt.Errorf("failed to move PAR2 file %s: %w", par2File, err)
+			}
+		}
+	}
+
+	// Move SFV file
+	if sfvPath != "" {
+		if _, err := os.Stat(sfvPath); err == nil {
+			destPath := filepath.Join(nzbDir, filepath.Base(sfvPath))
+			if err := os.Rename(sfvPath, destPath); err != nil {
+				return fmt.Errorf("failed to move SFV file %s: %w", sfvPath, err)
+			}
+		}
+	}
+
+	return nil
 }
