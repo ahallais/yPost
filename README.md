@@ -66,9 +66,9 @@ go build -o ypost
 Specific platform build
 
 ```bash
-GOOS=linux GOARCH=amd64 go build -o ypost-linux-amd64
-GOOS=darwin GOARCH=amd64 go build -o ypost-darwin-amd64
-GOOS=windows GOARCH=amd64 go build -o ypost-windows-amd64.exe
+GOOS=linux GOARCH=amd64 go build -o ypost-linux-amd64 main.go
+GOOS=darwin GOARCH=amd64 go build -o ypost-darwin-amd64 main.go
+GOOS=windows GOARCH=amd64 go build -o ypost-windows-amd64.exe main.go
 ```
 
 ### Configuration
