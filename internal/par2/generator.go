@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"

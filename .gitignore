@@ -1,0 +1,42 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, build output
+*.test
+*.out
+*.par2
+
+# Go build output
+bin/
+build/
+dist/
+output/
+*.log
+
+# Go workspace files
+go.work
+go.work.sum
+config.yaml
+
+# Dependency directories (optional)
+vendor/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDE/editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+
+#Binary Build
+ypost

@@ -1,6 +1,7 @@
 # Usenet Poster
 
-## Untested Yet done with Vibe Coding
+
+Disclaimer: This was done with Vibe Coding. I'm not familiar with Go, so I relied entirely on vibe coding here. Any feedback or improvements are welcome!
 
 
 A powerful, feature-rich command-line tool for posting files to Usenet newsgroups with comprehensive encoding, splitting, and recovery features.
@@ -21,7 +22,7 @@ A powerful, feature-rich command-line tool for posting files to Usenet newsgroup
 ## 🏗️ Project Structure
 
 ```
-usenet-poster/
+yPost/
 ├── cmd/                    # CLI commands (root, post, config)
 ├── internal/              # Internal packages
 │   ├── config/            # Configuration management
@@ -52,26 +53,21 @@ usenet-poster/
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/usenet-poster.git
-cd usenet-poster
+git clone https://github.com/ahallais/yPost.git
+cd yPost
 ```
 
 2. Build the application:
 ```bash
 go mod tidy
-go build -o usenet-poster
-```
-
-Alternatively, use the Makefile:
-```bash
-make build
+go build -o ypost
 ```
 
 ### Configuration
 
 1. Initialize configuration:
 ```bash
-./usenet-poster config init
+./ypost config init
 ```
 
 2. Edit the generated `config.yaml` file with your NNTP server details:
@@ -102,7 +98,7 @@ sfv:
 
 logging:
   level: "info"
-  file: "usenet-poster.log"
+  file: "ypost.log"
 ```
 
 ## 📖 Usage
@@ -111,47 +107,47 @@ logging:
 
 Post a single file:
 ```bash
-./usenet-poster post /path/to/your/file.iso
+./ypost post /path/to/your/file.iso
 ```
 
 Post multiple files:
 ```bash
-./usenet-poster post /path/to/file1.zip /path/to/file2.rar
+./ypost post /path/to/file1.zip /path/to/file2.rar
 ```
 
 Post with custom options:
 ```bash
-./usenet-poster post --newsgroup "alt.binaries.multimedia" --subject "My Custom Subject" /path/to/file.mkv
+./ypost post --newsgroup "alt.binaries.multimedia" --subject "My Custom Subject" /path/to/file.mkv
 ```
 
 ### Configuration Management
 
 View current configuration:
 ```bash
-./usenet-poster config show
+./ypost config show
 ```
 
 Update configuration values:
 ```bash
-./usenet-poster config set nntp.connections 12
-./usenet-poster config set posting.newsgroup "alt.binaries.movies"
+./ypost config set nntp.connections 12
+./ypost config set posting.newsgroup "alt.binaries.movies"
 ```
 
 ### Advanced Options
 
 Enable verbose logging:
 ```bash
-./usenet-poster post --verbose /path/to/file.iso
+./ypost post --verbose /path/to/file.iso
 ```
 
 Dry run (test without posting):
 ```bash
-./usenet-poster post --dry-run /path/to/file.iso
+./ypost post --dry-run /path/to/file.iso
 ```
 
 Custom output directory:
 ```bash
-./usenet-poster post --output-dir /path/to/output /path/to/file.iso
+./ypost post --output-dir /path/to/output /path/to/file.iso
 ```
 
 ## 🔧 Configuration Options
@@ -192,7 +188,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 If you encounter any issues or need support:
 
-1. Check the [Issues](https://github.com/yourusername/usenet-poster/issues) page for existing problems
+1. Check the [Issues](https://github.com/ahallais/yPost/issues) page for existing problems
 2. Create a new issue with detailed information about your problem
 3. Include relevant log output and configuration (remove sensitive information)
 

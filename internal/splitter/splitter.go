@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"usenet-poster/pkg/models"
+	"ypost/pkg/models"
 )
 
 // Splitter handles file splitting operations

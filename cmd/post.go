@@ -7,15 +7,15 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"usenet-poster/internal/config"
-	"usenet-poster/internal/logger"
-	"usenet-poster/internal/nntp"
-	"usenet-poster/internal/nzb"
-	"usenet-poster/internal/par2"
-	"usenet-poster/internal/sfv"
-	"usenet-poster/internal/splitter"
-	"usenet-poster/internal/yenc"
-	"usenet-poster/pkg/models"
+	"ypost/internal/config"
+	"ypost/internal/logger"
+	"ypost/internal/nntp"
+	"ypost/internal/nzb"
+	"ypost/internal/par2"
+	"ypost/internal/sfv"
+	"ypost/internal/splitter"
+	"ypost/internal/yenc"
+	"ypost/pkg/models"
 )
 
 var (
@@ -62,7 +62,7 @@ func runPost(cmd *cobra.Command, args []string) {
 	filePath := args[0]
 
 	// Load configuration
-	cfg, err := config.LoadConfig(cfgFile)
+	cfg, configFileUsed, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		fmt.Printf("Error loading config: %v\n", err)
 		os.Exit(1)
@@ -101,6 +101,26 @@ func runPost(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 	defer log.Close()
+
+	// Log configuration file path and contents
+	if configFileUsed != "" {
+		// Get absolute path
+		absPath, err := filepath.Abs(configFileUsed)
+		if err != nil {
+			absPath = configFileUsed
+		}
+		log.Info("Configuration file loaded: %s", absPath)
+		
+		// Read and log config file contents
+		content, err := os.ReadFile(configFileUsed)
+		if err == nil {
+			log.Info("Config contents: %s", string(content))
+		} else {
+			log.Warn("Could not read config file contents: %v", err)
+		}
+	} else {
+		log.Info("Using default configuration (no config file found)")
+	}
 
 	// Check if file exists
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -176,7 +196,7 @@ func runPost(cmd *cobra.Command, args []string) {
 		pool := nntp.NewConnectionPool(&server, server.MaxConns)
 		
 		// Upload parts
-		segments, err := uploadParts(pool, parts, &cfg.Posting, &yencEnc, log)
+		segments, err := uploadParts(pool, parts, *cfg, &yencEnc, log)
 		if err != nil {
 			log.Error("Failed to upload parts: %v", err)
 			continue
@@ -203,17 +223,17 @@ func runPost(cmd *cobra.Command, args []string) {
 	log.Info("NZB file: %s", nzbPath)
 }
 
-func uploadParts(pool *nntp.ConnectionPool, parts []*models.FilePart, postingConfig *models.PostingConfig, yencEnc *yenc.Encoder, log *logger.Logger) ([]*models.PostSegment, error) {
+func uploadParts(pool *nntp.ConnectionPool, parts []*models.FilePart, postingConfig models.Config, yencEnc *yenc.Encoder, log *logger.Logger) ([]*models.PostSegment, error) {
 	var segments []*models.PostSegment
 	
-	for i, part := range parts {
+	for _, part := range parts {
 		client, err := pool.GetClient()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get client: %w", err)
 		}
 
 		// Join group
-		if err := client.JoinGroup(postingConfig.Group); err != nil {
+		if err := client.JoinGroup(postingConfig.Posting.Group); err != nil {
 			return nil, fmt.Errorf("failed to join group: %w", err)
 		}
 
@@ -226,11 +246,11 @@ func uploadParts(pool *nntp.ConnectionPool, parts []*models.FilePart, postingCon
 
 		// Upload part
 		messageID, err := client.PostArticle(
-			postingConfig.Group,
+			postingConfig.Posting.Group,
 			subject,
-			fmt.Sprintf("%s <%s>", postingConfig.PosterName, postingConfig.PosterEmail),
+			fmt.Sprintf("%s <%s>", postingConfig.Posting.PosterName, postingConfig.Posting.PosterEmail),
 			encoded,
-			postingConfig.CustomHeaders,
+			postingConfig.Posting.CustomHeaders,
 		)
 		
 		if err != nil {

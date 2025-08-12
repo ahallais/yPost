@@ -6,11 +6,11 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/viper"
-	"usenet-poster/pkg/models"
+	"ypost/pkg/models"
 )
 
 // LoadConfig loads configuration from file and environment
-func LoadConfig(configPath string) (*models.Config, error) {
+func LoadConfig(configPath string) (*models.Config, string, error) {
 	v := viper.New()
 
 	// Set default values
@@ -22,9 +22,10 @@ func LoadConfig(configPath string) (*models.Config, error) {
 	} else {
 		v.SetConfigName("config")
 		v.SetConfigType("yaml")
-		v.AddConfigPath(".")
-		v.AddConfigPath("$HOME/.usenet-poster")
-		v.AddConfigPath("/etc/usenet-poster")
+		// Search paths in order:
+		v.AddConfigPath(".")                // 1. Current directory
+		v.AddConfigPath("$HOME/.ypost")     // 2. User's home directory
+		v.AddConfigPath("/etc/ypost")       // 3. System-wide configuration
 	}
 
 	// Read environment variables
@@ -34,54 +35,83 @@ func LoadConfig(configPath string) (*models.Config, error) {
 	// Read config file
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			return nil, fmt.Errorf("failed to read config file: %w", err)
+			return nil, "", fmt.Errorf("failed to read config file: %w", err)
 		}
 	}
 
 	var config models.Config
 	if err := v.Unmarshal(&config); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+		return nil, "", fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	// Handle legacy configuration format (backward compatibility)
+	if len(config.NNTP.Servers) == 0 {
+		// Check if legacy format is used
+		if config.NNTP.Server != "" {
+			// Convert legacy format to new format
+			server := models.ServerConfig{
+				Host:     config.NNTP.Server,
+				Port:     config.NNTP.Port,
+				Username: config.NNTP.Username,
+				Password: config.NNTP.Password,
+				SSL:      config.NNTP.SSL,
+				MaxConns: config.NNTP.Connections,
+			}
+			if server.Port == 0 {
+				server.Port = 563 // Default NNTP SSL port
+			}
+			if server.MaxConns == 0 {
+				server.MaxConns = 4 // Default connections
+			}
+			config.NNTP.Servers = []models.ServerConfig{server}
+		}
 	}
 
 	// Validate configuration
 	if err := validateConfig(&config); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %w", err)
+		return nil, "", fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	return &config, nil
+	configFileUsed := v.ConfigFileUsed()
+	return &config, configFileUsed, nil
 }
 
 // setDefaults sets default configuration values
 func setDefaults(v *viper.Viper) {
-	// NNTP defaults
-	v.SetDefault("nntp.servers", []map[string]interface{}{
-		{
-			"host":           "news.example.com",
-			"port":           119,
-			"username":       "",
-			"password":       "",
-			"ssl":            false,
-			"max_connections": 4,
-		},
-	})
+	// NNTP defaults - don't set servers default to allow legacy format
+	v.SetDefault("nntp.server", "your-newsserver.com")
+	v.SetDefault("nntp.port", 563)
+	v.SetDefault("nntp.username", "your-username")
+	v.SetDefault("nntp.password", "your-password")
+	v.SetDefault("nntp.ssl", true)
+	v.SetDefault("nntp.connections", 4)
 
 	// Posting defaults
 	v.SetDefault("posting.group", "alt.binaries.test")
-	v.SetDefault("posting.poster_name", "Usenet Poster")
 	v.SetDefault("posting.poster_email", "poster@example.com")
-	v.SetDefault("posting.subject_template", "{{.FileName}} [{{.PartNumber}}/{{.TotalParts}}]")
+	v.SetDefault("posting.subject_template", "[{{.Index}}/{{.Total}}] - {{.Filename}} - ({{.Size}})")
 	v.SetDefault("posting.max_line_length", 128)
-	v.SetDefault("posting.max_part_size", 750*1024) // 750KB
-	v.SetDefault("posting.custom_headers", map[string]string{})
+	v.SetDefault("posting.max_part_size", 750000)
 
 	// Output defaults
-	v.SetDefault("output.output_dir", "./output")
-	v.SetDefault("output.nzb_dir", "./output/nzb")
-	v.SetDefault("output.log_dir", "./output/logs")
+	v.SetDefault("output.output_dir", "output")
+	v.SetDefault("output.nzb_dir", "output/nzb")
+	v.SetDefault("output.log_dir", "output/logs")
 
-	// Features defaults
-	v.SetDefault("features.create_par2", true)
-	v.SetDefault("features.create_sfv", true)
+	// Splitting defaults
+	v.SetDefault("splitting.max_file_size", "50MB")
+	v.SetDefault("splitting.max_lines", 5000)
+
+	// Par2 defaults
+	v.SetDefault("par2.redundancy", 10)
+	v.SetDefault("par2.enabled", true)
+
+	// SFV defaults
+	v.SetDefault("sfv.enabled", true)
+
+	// Logging defaults
+	v.SetDefault("logging.level", "info")
+	v.SetDefault("logging.file", "ypost.log")
 }
 
 // validateConfig validates the configuration
@@ -140,7 +170,10 @@ func SaveConfig(config *models.Config, configPath string) error {
 	v.Set("nntp", config.NNTP)
 	v.Set("posting", config.Posting)
 	v.Set("output", config.Output)
-	v.Set("features", config.Features)
+	v.Set("splitting", config.Splitting)
+	v.Set("par2", config.Par2)
+	v.Set("sfv", config.SFV)
+	v.Set("logging", config.Logging)
 
 	return v.WriteConfigAs(configPath)
 }
@@ -149,42 +182,43 @@ func SaveConfig(config *models.Config, configPath string) error {
 func CreateSampleConfig(configPath string) error {
 	sampleConfig := &models.Config{}
 
-	// Set sample values
-	sampleConfig.NNTP.Servers = []models.ServerConfig{
-		{
-			Host:     "news.example.com",
-			Port:     119,
-			Username: "your_username",
-			Password: "your_password",
-			SSL:      false,
-			MaxConns: 4,
-		},
-		{
-			Host:     "ssl.news.example.com",
-			Port:     563,
-			Username: "your_username",
-			Password: "your_password",
-			SSL:      true,
-			MaxConns: 8,
-		},
+	// NNTP configuration
+	defaultServer := models.ServerConfig{
+		Host:     "your-newsserver.com",
+		Port:     563,
+		Username: "your-username",
+		Password: "your-password",
+		SSL:      true,
+		MaxConns: 8,
 	}
+	sampleConfig.NNTP.Servers = []models.ServerConfig{defaultServer}
 
+	// Posting configuration
 	sampleConfig.Posting.Group = "alt.binaries.test"
-	sampleConfig.Posting.PosterName = "Your Name"
-	sampleConfig.Posting.PosterEmail = "your.email@example.com"
-	sampleConfig.Posting.SubjectTemplate = "{{.FileName}} [{{.PartNumber}}/{{.TotalParts}}] - {{.FileSize}}"
+	sampleConfig.Posting.PosterEmail = "poster@example.com"
+	sampleConfig.Posting.SubjectTemplate = "[{{.Index}}/{{.Total}}] - {{.Filename}} - ({{.Size}})"
 	sampleConfig.Posting.MaxLineLength = 128
-	sampleConfig.Posting.MaxPartSize = 750 * 1024
-	sampleConfig.Posting.CustomHeaders = map[string]string{
-		"X-Usenet-Tool": "usenet-poster",
-	}
+	sampleConfig.Posting.MaxPartSize = 750000
 
-	sampleConfig.Output.OutputDir = "./output"
-	sampleConfig.Output.NZBDir = "./output/nzb"
-	sampleConfig.Output.LogDir = "./output/logs"
+	// Output configuration
+	sampleConfig.Output.OutputDir = "output"
+	sampleConfig.Output.NZBDir = "output/nzb"
+	sampleConfig.Output.LogDir = "output/logs"
 
-	sampleConfig.Features.CreatePAR2 = true
-	sampleConfig.Features.CreateSFV = true
+	// Splitting configuration
+	sampleConfig.Splitting.MaxFileSize = "50MB"
+	sampleConfig.Splitting.MaxLines = 5000
+
+	// Par2 configuration
+	sampleConfig.Par2.Redundancy = 10
+	sampleConfig.Par2.Enabled = true
+
+	// SFV configuration
+	sampleConfig.SFV.Enabled = true
+
+	// Logging configuration
+	sampleConfig.Logging.Level = "info"
+	sampleConfig.Logging.File = "ypost.log"
 
 	return SaveConfig(sampleConfig, configPath)
 }
@@ -199,7 +233,7 @@ func GetConfigPath() string {
 	// Check for config in home directory
 	homeDir, err := os.UserHomeDir()
 	if err == nil {
-		homeConfig := filepath.Join(homeDir, ".usenet-poster", "config.yaml")
+		homeConfig := filepath.Join(homeDir, ".ypost", "config.yaml")
 		if _, err := os.Stat(homeConfig); err == nil {
 			return homeConfig
 		}

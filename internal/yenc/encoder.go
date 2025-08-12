@@ -2,9 +2,9 @@ package yenc
 
 import (
 	"bytes"
-	"crypto/crc32"
 	"encoding/hex"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"strings"
 )

@@ -7,26 +7,49 @@ import (
 // Config represents the application configuration
 type Config struct {
 	NNTP struct {
-		Servers []ServerConfig `mapstructure:"servers"`
+		Servers     []ServerConfig `mapstructure:"servers"`
+		Server      string         `mapstructure:"server"`
+		Port        int           `mapstructure:"port"`
+		Username    string         `mapstructure:"username"`
+		Password    string         `mapstructure:"password"`
+		SSL         bool          `mapstructure:"ssl"`
+		Connections int           `mapstructure:"connections"`
 	} `mapstructure:"nntp"`
 	Posting struct {
 		Group           string            `mapstructure:"group"`
-		PosterName      string            `mapstructure:"poster_name"`
-		PosterEmail     string            `mapstructure:"poster_email"`
+		Newsgroup      string            `mapstructure:"newsgroup"`
+		From           string            `mapstructure:"from"`
+		PosterName     string            `mapstructure:"poster_name"`
+		PosterEmail    string            `mapstructure:"poster_email"`
 		SubjectTemplate string            `mapstructure:"subject_template"`
-		MaxLineLength   int               `mapstructure:"max_line_length"`
-		MaxPartSize     int64             `mapstructure:"max_part_size"`
-		CustomHeaders   map[string]string `mapstructure:"custom_headers"`
+		MaxLineLength  int               `mapstructure:"max_line_length"`
+		MaxPartSize    int64             `mapstructure:"max_part_size"`
+		CustomHeaders  map[string]string `mapstructure:"custom_headers"`
 	} `mapstructure:"posting"`
 	Output struct {
 		OutputDir string `mapstructure:"output_dir"`
 		NZBDir    string `mapstructure:"nzb_dir"`
 		LogDir    string `mapstructure:"log_dir"`
 	} `mapstructure:"output"`
+	Splitting struct {
+		MaxFileSize string `mapstructure:"max_file_size"`
+		MaxLines    int    `mapstructure:"max_lines"`
+	} `mapstructure:"splitting"`
 	Features struct {
 		CreatePAR2 bool `mapstructure:"create_par2"`
 		CreateSFV  bool `mapstructure:"create_sfv"`
 	} `mapstructure:"features"`
+	Par2 struct {
+		Redundancy int  `mapstructure:"redundancy"`
+		Enabled    bool `mapstructure:"enabled"`
+	} `mapstructure:"par2"`
+	SFV struct {
+		Enabled bool `mapstructure:"enabled"`
+	} `mapstructure:"sfv"`
+	Logging struct {
+		Level string `mapstructure:"level"`
+		File  string `mapstructure:"file"`
+	} `mapstructure:"logging"`
 }
 
 // ServerConfig represents NNTP server configuration

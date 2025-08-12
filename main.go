@@ -1,6 +1,6 @@
 package main
 
-import "usenet-poster/cmd"
+import "ypost/cmd"
 
 func main() {
 	cmd.Execute()

@@ -4,14 +4,13 @@ import (
 	"bufio"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"net"
 	"net/textproto"
 	"strings"
 	"sync"
 	"time"
 
-	"usenet-poster/pkg/models"
+	"ypost/pkg/models"
 )
 
 // Client represents an NNTP client connection
@@ -79,7 +78,7 @@ func (c *Client) Authenticate() error {
 	}
 
 	// Send AUTHINFO USER
-	_, _, err := c.writer.PrintfLine("AUTHINFO USER %s", c.config.Username)
+	err := c.writer.PrintfLine("AUTHINFO USER %s", c.config.Username)
 	if err != nil {
 		return fmt.Errorf("failed to send username: %w", err)
 	}
@@ -90,7 +89,7 @@ func (c *Client) Authenticate() error {
 	}
 
 	// Send AUTHINFO PASS
-	_, _, err = c.writer.PrintfLine("AUTHINFO PASS %s", c.config.Password)
+	err = c.writer.PrintfLine("AUTHINFO PASS %s", c.config.Password)
 	if err != nil {
 		return fmt.Errorf("failed to send password: %w", err)
 	}
@@ -110,7 +109,7 @@ func (c *Client) PostArticle(group string, subject string, from string, body str
 	}
 
 	// Send POST command
-	_, _, err := c.writer.PrintfLine("POST")
+	err := c.writer.PrintfLine("POST")
 	if err != nil {
 		return "", fmt.Errorf("failed to send POST command: %w", err)
 	}
@@ -140,14 +139,14 @@ func (c *Client) PostArticle(group string, subject string, from string, body str
 
 	// Send headers
 	for key, value := range headersToSend {
-		_, err := c.writer.PrintfLine("%s: %s", key, value)
+		err := c.writer.PrintfLine("%s: %s", key, value)
 		if err != nil {
 			return "", fmt.Errorf("failed to send header %s: %w", key, err)
 		}
 	}
 
 	// Send empty line to separate headers from body
-	_, err = c.writer.PrintfLine("")
+	err = c.writer.PrintfLine("")
 	if err != nil {
 		return "", fmt.Errorf("failed to send header separator: %w", err)
 	}
@@ -159,14 +158,14 @@ func (c *Client) PostArticle(group string, subject string, from string, body str
 		if strings.HasPrefix(line, ".") {
 			line = "." + line
 		}
-		_, err := c.writer.PrintfLine(line)
+		err := c.writer.PrintfLine(line)
 		if err != nil {
 			return "", fmt.Errorf("failed to send body line: %w", err)
 		}
 	}
 
 	// Send termination
-	_, err = c.writer.PrintfLine(".")
+	err = c.writer.PrintfLine(".")
 	if err != nil {
 		return "", fmt.Errorf("failed to send termination: %w", err)
 	}
@@ -181,7 +180,7 @@ func (c *Client) PostArticle(group string, subject string, from string, body str
 
 // JoinGroup joins the specified newsgroup
 func (c *Client) JoinGroup(group string) error {
-	_, _, err := c.writer.PrintfLine("GROUP %s", group)
+	err := c.writer.PrintfLine("GROUP %s", group)
 	if err != nil {
 		return fmt.Errorf("failed to send GROUP command: %w", err)
 	}
@@ -203,7 +202,7 @@ func (c *Client) Quit() error {
 		return nil
 	}
 
-	_, _ = c.writer.PrintfLine("QUIT")
+	_ = c.writer.PrintfLine("QUIT")
 	c.conn.Close()
 	c.connected = false
 	

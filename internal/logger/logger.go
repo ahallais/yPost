@@ -39,7 +39,7 @@ func New(logDir string) (*Logger, error) {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	logFileName := filepath.Join(logDir, fmt.Sprintf("usenet-poster-%s.log", time.Now().Format("2006-01-02")))
+	logFileName := filepath.Join(logDir, fmt.Sprintf("ypost-%s.log", time.Now().Format("2006-01-02")))
 	
 	logFile, err := os.OpenFile(logFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {

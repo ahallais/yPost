@@ -14,7 +14,7 @@ var (
 
 // rootCmd represents the base command
 var rootCmd = &cobra.Command{
-	Use:   "usenet-poster",
+	Use:   "ypost",
 	Short: "A CLI tool for posting files to Usenet",
 	Long: `Usenet Poster is a command-line tool for efficiently posting files to Usenet.
 It supports yEnc encoding, file splitting, NZB generation, PAR2 recovery files,
@@ -33,7 +33,7 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(initConfig)
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.usenet-poster/config.yaml)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.ypost/config.yaml)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
 }
 

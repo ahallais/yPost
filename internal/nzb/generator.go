@@ -6,10 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"time"
 
-	"usenet-poster/pkg/models"
+	"ypost/pkg/models"
 )
 
 // Generator handles NZB file generation
@@ -65,7 +64,7 @@ func (g *Generator) buildNZB(fileName string, segments []*models.PostSegment, gr
 
 	// Create file segment
 	fileSegment := models.NZBSegment{
-		Poster:   "usenet-poster@tool.local", // Default poster
+		Poster:   "ypost@tool.local", // Default poster
 		Date:     time.Now().Unix(),
 		Subject:  segments[0].Subject,
 		Groups:   []string{group},
