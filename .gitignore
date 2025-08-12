@@ -40,3 +40,6 @@ Thumbs.db
 
 #Binary Build
 ypost
+ypost-darwin-amd64
+ypost-linux-amd64
+
