@@ -8,8 +8,8 @@ import (
 )
 
 func main() {
-	// Test the progress tracker
-	fmt.Println("Testing progress tracking system...")
+	// Test the progress tracking system with progress bar
+	fmt.Println("Testing progress tracking system with progress bar...")
 	
 	// Simulate a file with 12 chunks
 	filename := "test_file.bin"
@@ -25,10 +25,10 @@ func main() {
 		// Simulate some work
 		time.Sleep(100 * time.Millisecond)
 		
-		// Emit progress
+		// Emit progress - this will update the progress bar
 		tracker.EmitProgress(i, chunkSize)
 	}
 	
-	// Mark as complete
+	// Mark as complete - this will finish the progress bar
 	tracker.EmitComplete()
 }

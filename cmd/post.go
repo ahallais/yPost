@@ -116,7 +116,7 @@ func runPost(cmd *cobra.Command, args []string) {
 		// Read and log config file contents
 		content, err := os.ReadFile(configFileUsed)
 		if err == nil {
-			log.Info("Config contents: %s", string(content))
+			log.Debug("Config contents: %s", string(content))
 		} else {
 			log.Warn("Could not read config file contents: %v", err)
 		}

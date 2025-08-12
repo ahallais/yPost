@@ -60,7 +60,7 @@ cd yPost
 2. Build the application:
 ```bash
 go mod tidy
-go build -o ypost
+go build -o ypost main.go
 ```
 
 Specific platform build
