@@ -24,12 +24,12 @@ func NewGenerator(outputDir string) *Generator {
 }
 
 // Generate creates an NZB file from posting results
-func (g *Generator) Generate(fileName string, segments []*models.PostSegment, group string) (string, error) {
+func (g *Generator) Generate(fileName string, segments []*models.PostSegment, group string, additionalFiles map[string][]*models.PostSegment) (string, error) {
 	if err := os.MkdirAll(g.outputDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	nzbFile := g.buildNZB(fileName, segments, group)
+	nzbFile := g.buildNZB(fileName, segments, group, additionalFiles)
 	
 	filePath := filepath.Join(g.outputDir, fmt.Sprintf("%s.nzb", sanitizeFileName(fileName)))
 	
@@ -50,7 +50,7 @@ func (g *Generator) Generate(fileName string, segments []*models.PostSegment, gr
 }
 
 // buildNZB constructs the NZB XML structure
-func (g *Generator) buildNZB(fileName string, segments []*models.PostSegment, group string) *models.NZBFile {
+func (g *Generator) buildNZB(fileName string, segments []*models.PostSegment, group string, additionalFiles map[string][]*models.PostSegment) *models.NZBFile {
 	nzb := &models.NZBFile{
 		Meta: models.NZBMeta{
 			Title: fileName,
@@ -62,7 +62,7 @@ func (g *Generator) buildNZB(fileName string, segments []*models.PostSegment, gr
 		return nzb
 	}
 
-	// Create file segment
+	// Create main file segment
 	fileSegment := models.NZBSegment{
 		Poster:   "ypost@tool.local", // Default poster
 		Date:     time.Now().Unix(),
@@ -80,6 +80,30 @@ func (g *Generator) buildNZB(fileName string, segments []*models.PostSegment, gr
 	}
 
 	nzb.Segments = append(nzb.Segments, fileSegment)
+
+	// Add additional files (PAR2, SFV, etc.)
+	for _, fileSegments := range additionalFiles {
+		if len(fileSegments) > 0 {
+			additionalSegment := models.NZBSegment{
+				Poster:   "ypost@tool.local",
+				Date:     time.Now().Unix(),
+				Subject:  fileSegments[0].Subject,
+				Groups:   []string{group},
+				Segments: make([]models.NZBPart, 0, len(fileSegments)),
+			}
+
+			for _, segment := range fileSegments {
+				additionalSegment.Segments = append(additionalSegment.Segments, models.NZBPart{
+					Bytes:     segment.BytesPosted,
+					Number:    segment.PartNumber,
+					MessageID: segment.MessageID,
+				})
+			}
+
+			nzb.Segments = append(nzb.Segments, additionalSegment)
+		}
+	}
+
 	return nzb
 }
 
