@@ -14,6 +14,7 @@ import (
 	"ypost/internal/par2"
 	"ypost/internal/sfv"
 	"ypost/internal/splitter"
+	"ypost/internal/utils"
 	"ypost/internal/yenc"
 	"ypost/pkg/models"
 )
@@ -122,33 +123,34 @@ func runPost(cmd *cobra.Command, args []string) {
 		log.Info("Using default configuration (no config file found)")
 	}
 
-	// Check if file exists
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		log.Fatal("File does not exist: %s", filePath)
-	}
+// Check if file exists
+if _, err := os.Stat(filePath); os.IsNotExist(err) {
+	log.Fatal("File does not exist: %s", filePath)
+}
 
-	// Create output directories
-	if err := os.MkdirAll(cfg.Output.OutputDir, 0755); err != nil {
-		log.Fatal("Failed to create output directory: %v", err)
-	}
-	if err := os.MkdirAll(cfg.Output.NZBDir, 0755); err != nil {
-		log.Fatal("Failed to create NZB directory: %v", err)
-	}
+// Create unified output directory with timestamp
+baseName := filepath.Base(filePath)
+unifiedOutputDir := utils.GetUnifiedOutputPath(cfg.Output.OutputDir, baseName)
 
-	// Initialize components
-	split := splitter.NewSplitter(cfg.Posting.MaxPartSize, cfg.Posting.MaxLineLength)
-	yencEnc := yenc.Encoder{}
-	nzbGen := nzb.NewGenerator(cfg.Output.NZBDir)
-	
-	var par2Gen *par2.Generator
-	var sfvGen *sfv.Generator
-	
-	if createPAR2 || cfg.Features.CreatePAR2 {
-		par2Gen = par2.NewGenerator(cfg.Output.OutputDir)
-	}
-	if createSFV || cfg.Features.CreateSFV {
-		sfvGen = sfv.NewGenerator(cfg.Output.OutputDir)
-	}
+// Ensure the unified directory exists (even if some file types are disabled)
+if err := os.MkdirAll(unifiedOutputDir, 0755); err != nil {
+	log.Fatal("Failed to create unified output directory: %v", err)
+}
+
+// Initialize components
+split := splitter.NewSplitter(cfg.Posting.MaxPartSize, cfg.Posting.MaxLineLength)
+yencEnc := yenc.Encoder{}
+nzbGen := nzb.NewGenerator(unifiedOutputDir)
+
+var par2Gen *par2.Generator
+var sfvGen *sfv.Generator
+
+if createPAR2 || cfg.Features.CreatePAR2 {
+	par2Gen = par2.NewGenerator(unifiedOutputDir)
+}
+if createSFV || cfg.Features.CreateSFV {
+	sfvGen = sfv.NewGenerator(unifiedOutputDir)
+}
 
 	// Split file into parts
 	log.Info("Splitting file: %s", filePath)
