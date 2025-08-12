@@ -12,6 +12,7 @@ import (
 	"ypost/internal/nntp"
 	"ypost/internal/nzb"
 	"ypost/internal/par2"
+	"ypost/internal/progress"
 	"ypost/internal/sfv"
 	"ypost/internal/splitter"
 	"ypost/internal/utils"
@@ -296,6 +297,15 @@ if createSFV || cfg.Features.CreateSFV {
 func uploadParts(pool *nntp.ConnectionPool, parts []*models.FilePart, postingConfig models.Config, yencEnc *yenc.Encoder, log *logger.Logger) ([]*models.PostSegment, error) {
 	var segments []*models.PostSegment
 	
+	// Calculate total bytes for progress tracking
+	var totalBytes int64
+	for _, part := range parts {
+		totalBytes += part.Size
+	}
+	
+	// Create progress tracker
+	tracker := progress.NewTracker(parts[0].FileName, len(parts), totalBytes)
+	
 	for _, part := range parts {
 		client, err := pool.GetClient()
 		if err != nil {
@@ -311,7 +321,7 @@ func uploadParts(pool *nntp.ConnectionPool, parts []*models.FilePart, postingCon
 		encoded := yencEnc.Encode(part.Data, part.FileName, part.PartNumber, len(parts))
 		
 		// Create subject
-		subject := fmt.Sprintf("%s [%d/%d] - %d bytes", 
+		subject := fmt.Sprintf("%s [%d/%d] - %d bytes",
 			part.FileName, part.PartNumber, len(parts), part.Size)
 
 		// Upload part
@@ -338,8 +348,15 @@ func uploadParts(pool *nntp.ConnectionPool, parts []*models.FilePart, postingCon
 		}
 		
 		segments = append(segments, segment)
+		
+		// Emit real-time progress
+		tracker.EmitProgress(part.PartNumber, part.Size)
+		
 		log.LogUploadProgress(part.FileName, part.PartNumber, len(parts), part.Size)
 	}
+	
+	// Emit completion message
+	tracker.EmitComplete()
 
 	return segments, nil
 }
