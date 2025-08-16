@@ -68,6 +68,11 @@ func LoadConfig(configPath string) (*models.Config, string, error) {
 		}
 	}
 
+	// Handle newsgroup/group field mapping
+	if config.Posting.Group == "" && config.Posting.Newsgroup != "" {
+		config.Posting.Group = config.Posting.Newsgroup
+	}
+
 	// Parse max_file_size and set it to posting.max_part_size
 	// Prioritize splitting.max_file_size over posting.max_part_size
 	if config.Splitting.MaxFileSize != "" {
@@ -108,6 +113,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("posting.subject_template", "[{{.Index}}/{{.Total}}] - {{.Filename}} - ({{.Size}})")
 	v.SetDefault("posting.max_line_length", 128)
 	v.SetDefault("posting.max_part_size", 750000)
+	v.SetDefault("posting.max_article_size", 500000) // 500KB for NNTP article chunks
 
 	// Output defaults
 	v.SetDefault("output.output_dir", "output")
@@ -153,6 +159,10 @@ func validateConfig(config *models.Config) error {
 
 	if config.Posting.MaxPartSize <= 0 {
 		return fmt.Errorf("max part size must be positive")
+	}
+
+	if config.Posting.MaxArticleSize <= 0 {
+		return fmt.Errorf("max article size must be positive")
 	}
 
 	if config.Posting.MaxLineLength <= 0 {
@@ -214,6 +224,7 @@ func CreateSampleConfig(configPath string) error {
 	sampleConfig.Posting.SubjectTemplate = "[{{.Index}}/{{.Total}}] - {{.Filename}} - ({{.Size}})"
 	sampleConfig.Posting.MaxLineLength = 128
 	sampleConfig.Posting.MaxPartSize = 750000
+	sampleConfig.Posting.MaxArticleSize = 500000
 
 	// Output configuration
 	sampleConfig.Output.OutputDir = "output"

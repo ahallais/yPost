@@ -23,17 +23,18 @@ import (
 )
 
 var (
-	group        string
-	posterName   string
-	posterEmail  string
-	subject      string
-	maxPartSize  int64
-	maxLineLen   int
-	createPAR2   bool
-	createSFV    bool
-	redundancy   int
-	outputDir    string
-	nzbDir       string
+	group          string
+	posterName     string
+	posterEmail    string
+	subject        string
+	maxPartSize    int64
+	maxArticleSize int64
+	maxLineLen     int
+	createPAR2     bool
+	createSFV      bool
+	redundancy     int
+	outputDir      string
+	nzbDir         string
 )
 
 // postCmd represents the post command
@@ -54,6 +55,7 @@ func init() {
 	postCmd.Flags().StringVar(&posterEmail, "poster-email", "", "email address of the poster")
 	postCmd.Flags().StringVarP(&subject, "subject", "s", "", "subject template")
 	postCmd.Flags().Int64Var(&maxPartSize, "max-part-size", 0, "maximum size per part in bytes")
+	postCmd.Flags().Int64Var(&maxArticleSize, "max-article-size", 0, "maximum size per NNTP article in bytes")
 	postCmd.Flags().IntVar(&maxLineLen, "max-line-length", 128, "maximum line length")
 	postCmd.Flags().BoolVar(&createPAR2, "par2", true, "create PAR2 recovery files")
 	postCmd.Flags().BoolVar(&createSFV, "sfv", true, "create SFV checksum file")
@@ -87,6 +89,9 @@ func runPost(cmd *cobra.Command, args []string) {
 	}
 	if maxPartSize > 0 {
 		cfg.Posting.MaxPartSize = maxPartSize
+	}
+	if maxArticleSize > 0 {
+		cfg.Posting.MaxArticleSize = maxArticleSize
 	}
 	if maxLineLen > 0 {
 		cfg.Posting.MaxLineLength = maxLineLen
@@ -347,113 +352,156 @@ func uploadParts(pool *nntp.ConnectionPool, parts []*models.FilePart, postingCon
 		totalBytes += part.Size
 	}
 	
+	// NNTP article size limit from configuration
+	maxArticleSize := int(postingConfig.Posting.MaxArticleSize)
+	
+	// Calculate total chunks across all parts for proper numbering
+	var totalChunks int
+	for _, part := range parts {
+		data, err := os.ReadFile(part.FilePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read part file %s: %w", part.FilePath, err)
+		}
+		chunksForPart := (len(data) + maxArticleSize - 1) / maxArticleSize
+		totalChunks += chunksForPart
+	}
+	
 	// Create progress tracker
-	tracker := progress.NewTracker(parts[0].FileName, len(parts), totalBytes)
+	tracker := progress.NewTracker(parts[0].FileName, totalChunks, totalBytes)
+	
+	chunkNumber := 1
 	
 	for _, part := range parts {
-		client, err := pool.GetClient()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get client: %w", err)
-		}
-
-		// Join group
-		if err := client.JoinGroup(postingConfig.Posting.Group); err != nil {
-			return nil, fmt.Errorf("failed to join group: %w", err)
-		}
-
 		// Read data from file
 		data, err := os.ReadFile(part.FilePath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read part file %s: %w", part.FilePath, err)
 		}
 
-		// Encode part
-		encoded := yencEnc.Encode(data, part.FileName, part.PartNumber, len(parts))
+		// Split part data into chunks that fit NNTP article size limits
+		chunks := splitDataIntoChunks(data, maxArticleSize)
 		
-		// Create subject using proper Go template processing
-		subject := postingConfig.Posting.SubjectTemplate
-		if subject == "" {
-			subject = "[{{.Index}}/{{.Total}}] - {{.Filename}} - ({{.Size}}) yEnc ({{.Index}}/{{.Total}})"
-		}
-		
-		// Calculate file size in human-readable format
-		fileSize := float64(totalBytes)
-		sizeStr := ""
-		if fileSize >= 1024*1024*1024 {
-			sizeStr = fmt.Sprintf("%.1fGB", fileSize/(1024*1024*1024))
-		} else if fileSize >= 1024*1024 {
-			sizeStr = fmt.Sprintf("%.1fMB", fileSize/(1024*1024))
-		} else if fileSize >= 1024 {
-			sizeStr = fmt.Sprintf("%.1fKB", fileSize/1024)
-		} else {
-			sizeStr = fmt.Sprintf("%dB", int(fileSize))
-		}
-		
-		// Create template data
-		templateData := struct {
-			Index    int
-			Total    int
-			Filename string
-			Size     string
-		}{
-			Index:    part.PartNumber,
-			Total:    len(parts),
-			Filename: part.FileName,
-			Size:     sizeStr,
-		}
-		
-		// Process template
-		tmpl, err := template.New("subject").Parse(subject)
-		if err != nil {
-			// Fallback to simple format if template parsing fails
-			subject = fmt.Sprintf("[%02d/%02d] - %s - (%s) yEnc (%d/%d)",
-				part.PartNumber, len(parts), part.FileName, sizeStr, part.PartNumber, len(parts))
-		} else {
-			var buf bytes.Buffer
-			if err := tmpl.Execute(&buf, templateData); err != nil {
-				// Fallback to simple format if template execution fails
-				subject = fmt.Sprintf("[%02d/%02d] - %s - (%s) yEnc (%d/%d)",
-					part.PartNumber, len(parts), part.FileName, sizeStr, part.PartNumber, len(parts))
-			} else {
-				subject = buf.String()
+		for chunkIndex, chunkData := range chunks {
+			client, err := pool.GetClient()
+			if err != nil {
+				return nil, fmt.Errorf("failed to get client: %w", err)
 			}
-		}
 
-		// Upload part
-		messageID, err := client.PostArticle(
-			postingConfig.Posting.Group,
-			subject,
-			fmt.Sprintf("%s <%s>", postingConfig.Posting.PosterName, postingConfig.Posting.PosterEmail),
-			encoded,
-			postingConfig.Posting.CustomHeaders,
-		)
-		
-		if err != nil {
-			return nil, fmt.Errorf("failed to post part %d: %w", part.PartNumber, err)
-		}
+			// Join group
+			if err := client.JoinGroup(postingConfig.Posting.Group); err != nil {
+				return nil, fmt.Errorf("failed to join group: %w", err)
+			}
 
-		segment := &models.PostSegment{
-			MessageID:   messageID,
-			PartNumber:  part.PartNumber,
-			TotalParts:  len(parts),
-			FileName:    part.FileName,
-			Subject:     subject,
-			PostedAt:    time.Now(),
-			BytesPosted: part.Size,
+			// Encode chunk with proper part information
+			// For yEnc, we use the original part numbering but post as separate chunks
+			encoded := yencEnc.Encode(chunkData, part.FileName, part.PartNumber, len(parts))
+			
+			// Create subject using proper Go template processing
+			subject := postingConfig.Posting.SubjectTemplate
+			if subject == "" {
+				subject = "[{{.Index}}/{{.Total}}] - {{.Filename}} - ({{.Size}}) yEnc ({{.ChunkIndex}}/{{.TotalChunks}})"
+			}
+			
+			// Calculate file size in human-readable format
+			fileSize := float64(totalBytes)
+			sizeStr := ""
+			if fileSize >= 1024*1024*1024 {
+				sizeStr = fmt.Sprintf("%.1fGB", fileSize/(1024*1024*1024))
+			} else if fileSize >= 1024*1024 {
+				sizeStr = fmt.Sprintf("%.1fMB", fileSize/(1024*1024))
+			} else if fileSize >= 1024 {
+				sizeStr = fmt.Sprintf("%.1fKB", fileSize/1024)
+			} else {
+				sizeStr = fmt.Sprintf("%dB", int(fileSize))
+			}
+			
+			// Create template data with both part and chunk information
+			templateData := struct {
+				Index       int    // Part number (for file parts like RAR)
+				Total       int    // Total parts
+				Filename    string
+				Size        string
+				ChunkIndex  int    // Chunk number (for NNTP articles)
+				TotalChunks int    // Total chunks
+			}{
+				Index:       part.PartNumber,
+				Total:       len(parts),
+				Filename:    part.FileName,
+				Size:        sizeStr,
+				ChunkIndex:  chunkNumber,
+				TotalChunks: totalChunks,
+			}
+			
+			// Process template
+			tmpl, err := template.New("subject").Parse(subject)
+			if err != nil {
+				// Fallback to format showing both part and chunk info
+				subject = fmt.Sprintf("(%02d/%02d) - %s - (%s) yEnc (%04d/%04d)",
+					part.PartNumber, len(parts), part.FileName, sizeStr, chunkNumber, totalChunks)
+			} else {
+				var buf bytes.Buffer
+				if err := tmpl.Execute(&buf, templateData); err != nil {
+					// Fallback to format showing both part and chunk info
+					subject = fmt.Sprintf("(%02d/%02d) - %s - (%s) yEnc (%04d/%04d)",
+						part.PartNumber, len(parts), part.FileName, sizeStr, chunkNumber, totalChunks)
+				} else {
+					subject = buf.String()
+				}
+			}
+
+			// Upload chunk
+			messageID, err := client.PostArticle(
+				postingConfig.Posting.Group,
+				subject,
+				fmt.Sprintf("%s <%s>", postingConfig.Posting.PosterName, postingConfig.Posting.PosterEmail),
+				encoded,
+				postingConfig.Posting.CustomHeaders,
+			)
+			
+			if err != nil {
+				return nil, fmt.Errorf("failed to post chunk %d of part %d: %w", chunkIndex+1, part.PartNumber, err)
+			}
+
+			segment := &models.PostSegment{
+				MessageID:   messageID,
+				PartNumber:  chunkNumber, // Use chunk number for NZB
+				TotalParts:  totalChunks, // Total chunks for NZB
+				FileName:    part.FileName,
+				Subject:     subject,
+				PostedAt:    time.Now(),
+				BytesPosted: int64(len(chunkData)),
+			}
+			
+			segments = append(segments, segment)
+			
+			// Emit real-time progress
+			tracker.EmitProgress(chunkNumber, int64(len(chunkData)))
+			
+			log.LogUploadProgress(part.FileName, chunkNumber, totalChunks, int64(len(chunkData)))
+			
+			chunkNumber++
 		}
-		
-		segments = append(segments, segment)
-		
-		// Emit real-time progress
-		tracker.EmitProgress(part.PartNumber, part.Size)
-		
-		log.LogUploadProgress(part.FileName, part.PartNumber, len(parts), part.Size)
 	}
 	
 	// Emit completion message
 	tracker.EmitComplete()
 
 	return segments, nil
+}
+
+// splitDataIntoChunks splits data into chunks of specified maximum size
+func splitDataIntoChunks(data []byte, maxChunkSize int) [][]byte {
+	var chunks [][]byte
+	
+	for i := 0; i < len(data); i += maxChunkSize {
+		end := i + maxChunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+		chunks = append(chunks, data[i:end])
+	}
+	
+	return chunks
 }
 
 func sumPartSizes(parts []*models.FilePart) int64 {

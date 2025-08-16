@@ -24,6 +24,7 @@ type Config struct {
 		SubjectTemplate string            `mapstructure:"subject_template"`
 		MaxLineLength  int               `mapstructure:"max_line_length"`
 		MaxPartSize    int64             `mapstructure:"max_part_size"`
+		MaxArticleSize int64             `mapstructure:"max_article_size"`
 		CustomHeaders  map[string]string `mapstructure:"custom_headers"`
 	} `mapstructure:"posting"`
 	Output struct {
