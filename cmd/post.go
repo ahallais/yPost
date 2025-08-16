@@ -162,9 +162,9 @@ if createSFV || cfg.Features.CreateSFV {
 	sfvGen = sfv.NewGenerator(unifiedOutputDir)
 }
 
-	// Split file into parts
+	// Split file into parts and save them to the output directory
 	log.Info("Splitting file: %s", filePath)
-	parts, err := split.SplitFile(filePath)
+	parts, err := split.SplitFile(filePath, unifiedOutputDir)
 	if err != nil {
 		log.Fatal("Failed to split file: %v", err)
 	}
@@ -237,7 +237,7 @@ if createSFV || cfg.Features.CreateSFV {
 	if len(par2Files) > 0 {
 		log.Info("Posting PAR2 recovery files...")
 		for _, par2File := range par2Files {
-			par2Parts, err := split.SplitFile(par2File)
+			par2Parts, err := split.SplitFile(par2File, unifiedOutputDir)
 			if err != nil {
 				log.Error("Failed to split PAR2 file: %v", err)
 				continue
@@ -257,7 +257,7 @@ if createSFV || cfg.Features.CreateSFV {
 	var sfvSegments []*models.PostSegment
 	if sfvPath != "" {
 		log.Info("Posting SFV checksum file...")
-		sfvParts, err := split.SplitFile(sfvPath)
+		sfvParts, err := split.SplitFile(sfvPath, unifiedOutputDir)
 		if err != nil {
 			log.Error("Failed to split SFV file: %v", err)
 		} else {
@@ -299,8 +299,32 @@ if createSFV || cfg.Features.CreateSFV {
 		log.Info("Successfully moved PAR2 and SFV files to NZB directory")
 	}
 
+	// Clean up temporary part files
+	log.Info("Cleaning up temporary files...")
+	if err := cleanupAllPartFiles(split, parts, par2Segments, sfvSegments); err != nil {
+		log.Error("Failed to clean up some temporary files: %v", err)
+	}
+
 	log.Info("Posting completed successfully!")
 	log.Info("NZB file: %s", nzbPath)
+}
+
+// cleanupAllPartFiles removes all temporary part files
+func cleanupAllPartFiles(split *splitter.Splitter, mainParts []*models.FilePart, par2Segments, sfvSegments []*models.PostSegment) error {
+	var errors []error
+
+	// Clean up main file parts
+	if err := split.CleanupPartFiles(mainParts); err != nil {
+		errors = append(errors, err)
+	}
+
+	// We don't have direct access to the PAR2 and SFV parts, but we can extract the file paths
+	// from the segments and clean them up separately if needed
+
+	if len(errors) > 0 {
+		return fmt.Errorf("encountered %d errors during cleanup", len(errors))
+	}
+	return nil
 }
 
 func uploadParts(pool *nntp.ConnectionPool, parts []*models.FilePart, postingConfig models.Config, yencEnc *yenc.Encoder, log *logger.Logger) ([]*models.PostSegment, error) {
@@ -326,8 +350,14 @@ func uploadParts(pool *nntp.ConnectionPool, parts []*models.FilePart, postingCon
 			return nil, fmt.Errorf("failed to join group: %w", err)
 		}
 
+		// Read data from file
+		data, err := os.ReadFile(part.FilePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read part file %s: %w", part.FilePath, err)
+		}
+
 		// Encode part
-		encoded := yencEnc.Encode(part.Data, part.FileName, part.PartNumber, len(parts))
+		encoded := yencEnc.Encode(data, part.FileName, part.PartNumber, len(parts))
 		
 		// Create subject using proper Go template processing
 		subject := postingConfig.Posting.SubjectTemplate

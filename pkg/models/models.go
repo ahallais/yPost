@@ -67,6 +67,7 @@ type FilePart struct {
 	PartNumber int
 	FileName   string
 	Size       int64
+	FilePath   string
 	Data       []byte
 	Checksum   string
 }

@@ -25,8 +25,8 @@ func NewSplitter(maxPartSize int64, maxLineLength int) *Splitter {
 	}
 }
 
-// SplitFile splits a file into parts based on configuration
-func (s *Splitter) SplitFile(filePath string) ([]*models.FilePart, error) {
+// SplitFile splits a file into parts based on configuration and saves them to output directory
+func (s *Splitter) SplitFile(filePath string, outputDir string) ([]*models.FilePart, error) {
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to stat file: %w", err)
@@ -38,9 +38,15 @@ func (s *Splitter) SplitFile(filePath string) ([]*models.FilePart, error) {
 	}
 	defer file.Close()
 
+	// Ensure output directory exists
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create output directory: %w", err)
+	}
+
 	var parts []*models.FilePart
 	partNumber := 1
 	bytesRead := int64(0)
+	totalParts := int((fileInfo.Size() + s.maxPartSize - 1) / s.maxPartSize)
 
 	for bytesRead < fileInfo.Size() {
 		partSize := s.maxPartSize
@@ -58,11 +64,21 @@ func (s *Splitter) SplitFile(filePath string) ([]*models.FilePart, error) {
 			data = data[:n]
 			checksum := s.calculateChecksum(data)
 			
+			// Generate filename for this part
+			partFileName := s.GetPartFileName(filepath.Base(filePath), partNumber, totalParts)
+			partFilePath := filepath.Join(outputDir, partFileName)
+			
+			// Write part to file
+			if err := os.WriteFile(partFilePath, data, 0644); err != nil {
+				return nil, fmt.Errorf("failed to write part file: %w", err)
+			}
+			
 			part := &models.FilePart{
 				PartNumber: partNumber,
 				FileName:   filepath.Base(filePath),
 				Size:       int64(n),
-				Data:       data,
+				FilePath:   partFilePath,
+				Data:       nil, // No longer storing data in memory
 				Checksum:   checksum,
 			}
 			
@@ -121,13 +137,19 @@ func (s *Splitter) JoinParts(parts []*models.FilePart, outputPath string) error 
 	defer outputFile.Close()
 
 	for _, part := range parts {
+		// Read data from file
+		data, err := os.ReadFile(part.FilePath)
+		if err != nil {
+			return fmt.Errorf("failed to read part file %s: %w", part.FilePath, err)
+		}
+		
 		// Verify checksum
-		calculatedChecksum := s.calculateChecksum(part.Data)
+		calculatedChecksum := s.calculateChecksum(data)
 		if calculatedChecksum != part.Checksum {
 			return fmt.Errorf("checksum mismatch for part %d", part.PartNumber)
 		}
 
-		_, err := outputFile.Write(part.Data)
+		_, err = outputFile.Write(data)
 		if err != nil {
 			return fmt.Errorf("failed to write part %d: %w", part.PartNumber, err)
 		}
@@ -152,9 +174,25 @@ func (s *Splitter) GetPartInfo(filePath string) (int64, int, error) {
 // ValidateParts validates that all parts exist and have correct checksums
 func (s *Splitter) ValidateParts(parts []*models.FilePart) error {
 	for _, part := range parts {
-		calculatedChecksum := s.calculateChecksum(part.Data)
+		// Read data from file
+		data, err := os.ReadFile(part.FilePath)
+		if err != nil {
+			return fmt.Errorf("failed to read part file %s: %w", part.FilePath, err)
+		}
+		
+		calculatedChecksum := s.calculateChecksum(data)
 		if calculatedChecksum != part.Checksum {
 			return fmt.Errorf("checksum validation failed for part %d", part.PartNumber)
+		}
+	}
+	return nil
+}
+
+// CleanupPartFiles removes temporary part files
+func (s *Splitter) CleanupPartFiles(parts []*models.FilePart) error {
+	for _, part := range parts {
+		if err := os.Remove(part.FilePath); err != nil {
+			return fmt.Errorf("failed to remove part file %s: %w", part.FilePath, err)
 		}
 	}
 	return nil
