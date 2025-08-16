@@ -141,6 +141,7 @@ if err := os.MkdirAll(unifiedOutputDir, 0755); err != nil {
 }
 
 // Initialize components
+fmt.Printf("DEBUG: Initializing splitter with MaxPartSize: %d bytes\n", cfg.Posting.MaxPartSize)
 split := splitter.NewSplitter(cfg.Posting.MaxPartSize)
 yencEnc := yenc.Encoder{}
 

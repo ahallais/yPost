@@ -18,6 +18,7 @@ type Splitter struct {
 
 // NewSplitter creates a new file splitter
 func NewSplitter(maxPartSize int64) *Splitter {
+	fmt.Printf("DEBUG: Splitter created with maxPartSize: %d bytes\n", maxPartSize)
 	return &Splitter{
 		maxPartSize: maxPartSize,
 	}
@@ -45,6 +46,9 @@ func (s *Splitter) SplitFile(filePath string, outputDir string) ([]*models.FileP
 	partNumber := 1
 	bytesRead := int64(0)
 	totalParts := int((fileInfo.Size() + s.maxPartSize - 1) / s.maxPartSize)
+	
+	fmt.Printf("DEBUG: SplitFile - fileSize: %d, maxPartSize: %d, calculated totalParts: %d\n", 
+		fileInfo.Size(), s.maxPartSize, totalParts)
 
 	for bytesRead < fileInfo.Size() {
 		partSize := s.maxPartSize
