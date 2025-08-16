@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
-	"syscall"
 	"time"
 	"unsafe"
 
@@ -127,7 +126,12 @@ func (g *Generator) generateRecoveryDataMmap(filePath string, sliceSize, numSlic
 	}
 	defer reader.Close()
 
-	data := reader.Data()
+	// Read all data from mmap reader
+	data := make([]byte, reader.Len())
+	_, err = reader.ReadAt(data, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read mmap data: %w", err)
+	}
 	
 	// Create progress bar with throttled updates
 	progressBar := progressbar.NewOptions(recoverySize,
