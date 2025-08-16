@@ -33,7 +33,6 @@ type Config struct {
 	} `mapstructure:"output"`
 	Splitting struct {
 		MaxFileSize string `mapstructure:"max_file_size"`
-		MaxLines    int    `mapstructure:"max_lines"`
 	} `mapstructure:"splitting"`
 	Features struct {
 		CreatePAR2 bool `mapstructure:"create_par2"`

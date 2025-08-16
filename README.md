@@ -67,7 +67,6 @@ posting:
 
 splitting:
   max_file_size: "50MB"
-  max_lines: 5000
 
 par2:
   redundancy: 10
@@ -134,7 +133,6 @@ Post a file to a specific newsgroup with a custom subject:
 
 ### File Processing
 - `max_file_size`: Maximum size before splitting (e.g., "50MB", "100MB")
-- `max_lines`: Maximum lines per post part
 - `redundancy`: PAR2 redundancy percentage (5-50)
 
 

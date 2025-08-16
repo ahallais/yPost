@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/viper"
+	"ypost/internal/utils"
 	"ypost/pkg/models"
 )
 
@@ -67,6 +68,21 @@ func LoadConfig(configPath string) (*models.Config, string, error) {
 		}
 	}
 
+	// Parse max_file_size and set it to posting.max_part_size
+	// Prioritize splitting.max_file_size over posting.max_part_size
+	if config.Splitting.MaxFileSize != "" {
+		fmt.Printf("DEBUG: Found splitting.max_file_size: %s\n", config.Splitting.MaxFileSize)
+		maxPartSize, err := utils.ParseFileSize(config.Splitting.MaxFileSize)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid max_file_size: %w", err)
+		}
+		fmt.Printf("DEBUG: Parsed max_file_size to %d bytes\n", maxPartSize)
+		config.Posting.MaxPartSize = maxPartSize
+		fmt.Printf("DEBUG: Set posting.max_part_size to %d bytes\n", config.Posting.MaxPartSize)
+	} else {
+		fmt.Printf("DEBUG: No splitting.max_file_size found, using posting.max_part_size: %d\n", config.Posting.MaxPartSize)
+	}
+
 	// Validate configuration
 	if err := validateConfig(&config); err != nil {
 		return nil, "", fmt.Errorf("invalid configuration: %w", err)
@@ -100,7 +116,6 @@ func setDefaults(v *viper.Viper) {
 
 	// Splitting defaults
 	v.SetDefault("splitting.max_file_size", "50MB")
-	v.SetDefault("splitting.max_lines", 5000)
 
 	// Par2 defaults
 	v.SetDefault("par2.redundancy", 10)
@@ -207,7 +222,6 @@ func CreateSampleConfig(configPath string) error {
 
 	// Splitting configuration
 	sampleConfig.Splitting.MaxFileSize = "50MB"
-	sampleConfig.Splitting.MaxLines = 5000
 
 	// Par2 configuration
 	sampleConfig.Par2.Redundancy = 10

@@ -38,7 +38,7 @@ func testCompleteWorkflow() {
 	defer os.RemoveAll(outputDir)
 
 	// Initialize components
-	split := splitter.NewSplitter(1024, 128) // Small parts for testing
+	split := splitter.NewSplitter(1024) // Small parts for testing
 	yencEnc := yenc.Encoder{}
 	testPoster := "test@example.com"
 	nzbGen := nzb.NewGenerator(outputDir, testPoster)
