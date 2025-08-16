@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"text/template"
 	"time"
 
@@ -343,9 +344,18 @@ func cleanupAllPartFiles(split *splitter.Splitter, mainParts []*models.FilePart,
 	return nil
 }
 
+// uploadJob represents a single chunk upload task
+type uploadJob struct {
+	chunkData   []byte
+	part        *models.FilePart
+	chunkIndex  int
+	chunkNumber int
+	totalParts  int
+	totalChunks int
+	totalBytes  int64
+}
+
 func uploadParts(pool *nntp.ConnectionPool, parts []*models.FilePart, postingConfig models.Config, yencEnc *yenc.Encoder, log *logger.Logger) ([]*models.PostSegment, error) {
-	var segments []*models.PostSegment
-	
 	// Calculate total bytes for progress tracking
 	var totalBytes int64
 	for _, part := range parts {
@@ -357,136 +367,209 @@ func uploadParts(pool *nntp.ConnectionPool, parts []*models.FilePart, postingCon
 	
 	// Calculate total chunks across all parts for proper numbering
 	var totalChunks int
+	var allJobs []uploadJob
+	
+	chunkNumber := 1
+	
+	// Prepare all upload jobs
 	for _, part := range parts {
 		data, err := os.ReadFile(part.FilePath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read part file %s: %w", part.FilePath, err)
 		}
-		chunksForPart := (len(data) + maxArticleSize - 1) / maxArticleSize
-		totalChunks += chunksForPart
+		
+		chunks := splitDataIntoChunks(data, maxArticleSize)
+		totalChunks += len(chunks)
+		
+		for chunkIndex, chunkData := range chunks {
+			job := uploadJob{
+				chunkData:   chunkData,
+				part:        part,
+				chunkIndex:  chunkIndex,
+				chunkNumber: chunkNumber,
+				totalParts:  len(parts),
+				totalChunks: totalChunks, // Will be updated after we know the final count
+				totalBytes:  totalBytes,
+			}
+			allJobs = append(allJobs, job)
+			chunkNumber++
+		}
+	}
+	
+	// Update totalChunks in all jobs now that we know the final count
+	for i := range allJobs {
+		allJobs[i].totalChunks = totalChunks
 	}
 	
 	// Create progress tracker
 	tracker := progress.NewTracker(parts[0].FileName, totalChunks, totalBytes)
 	
-	chunkNumber := 1
+	// Create channels for work distribution and result collection
+	jobs := make(chan uploadJob, len(allJobs))
+	results := make(chan *models.PostSegment, len(allJobs))
+	errors := make(chan error, len(allJobs))
 	
-	for _, part := range parts {
-		// Read data from file
-		data, err := os.ReadFile(part.FilePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read part file %s: %w", part.FilePath, err)
-		}
-
-		// Split part data into chunks that fit NNTP article size limits
-		chunks := splitDataIntoChunks(data, maxArticleSize)
-		
-		for chunkIndex, chunkData := range chunks {
-			client, err := pool.GetClient()
-			if err != nil {
-				return nil, fmt.Errorf("failed to get client: %w", err)
-			}
-
-			// Join group
-			if err := client.JoinGroup(postingConfig.Posting.Group); err != nil {
-				return nil, fmt.Errorf("failed to join group: %w", err)
-			}
-
-			// Encode chunk with proper part information
-			// For yEnc, we use the original part numbering but post as separate chunks
-			encoded := yencEnc.Encode(chunkData, part.FileName, part.PartNumber, len(parts))
+	// Determine number of workers (use connection count from config)
+	numWorkers := 4 // Default to 4 connections
+	if len(postingConfig.NNTP.Servers) > 0 {
+		numWorkers = postingConfig.NNTP.Servers[0].MaxConns
+	}
+	
+	log.Info("Starting parallel upload with %d workers for %d chunks", numWorkers, totalChunks)
+	
+	// Start worker goroutines
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
 			
-			// Create subject using proper Go template processing
-			subject := postingConfig.Posting.SubjectTemplate
-			if subject == "" {
-				subject = "[{{.Index}}/{{.Total}}] - {{.Filename}} - ({{.Size}}) yEnc ({{.ChunkIndex}}/{{.TotalChunks}})"
-			}
-			
-			// Calculate file size in human-readable format
-			fileSize := float64(totalBytes)
-			sizeStr := ""
-			if fileSize >= 1024*1024*1024 {
-				sizeStr = fmt.Sprintf("%.1fGB", fileSize/(1024*1024*1024))
-			} else if fileSize >= 1024*1024 {
-				sizeStr = fmt.Sprintf("%.1fMB", fileSize/(1024*1024))
-			} else if fileSize >= 1024 {
-				sizeStr = fmt.Sprintf("%.1fKB", fileSize/1024)
-			} else {
-				sizeStr = fmt.Sprintf("%dB", int(fileSize))
-			}
-			
-			// Create template data with both part and chunk information
-			templateData := struct {
-				Index       int    // Part number (for file parts like RAR)
-				Total       int    // Total parts
-				Filename    string
-				Size        string
-				ChunkIndex  int    // Chunk number (for NNTP articles)
-				TotalChunks int    // Total chunks
-			}{
-				Index:       part.PartNumber,
-				Total:       len(parts),
-				Filename:    part.FileName,
-				Size:        sizeStr,
-				ChunkIndex:  chunkNumber,
-				TotalChunks: totalChunks,
-			}
-			
-			// Process template
-			tmpl, err := template.New("subject").Parse(subject)
-			if err != nil {
-				// Fallback to format showing both part and chunk info
-				subject = fmt.Sprintf("(%02d/%02d) - %s - (%s) yEnc (%04d/%04d)",
-					part.PartNumber, len(parts), part.FileName, sizeStr, chunkNumber, totalChunks)
-			} else {
-				var buf bytes.Buffer
-				if err := tmpl.Execute(&buf, templateData); err != nil {
-					// Fallback to format showing both part and chunk info
-					subject = fmt.Sprintf("(%02d/%02d) - %s - (%s) yEnc (%04d/%04d)",
-						part.PartNumber, len(parts), part.FileName, sizeStr, chunkNumber, totalChunks)
-				} else {
-					subject = buf.String()
+			for job := range jobs {
+				segment, err := uploadChunk(pool, job, postingConfig, yencEnc, log, tracker)
+				if err != nil {
+					log.Error("Worker %d failed to upload chunk %d: %v", workerID, job.chunkNumber, err)
+					errors <- fmt.Errorf("worker %d: %w", workerID, err)
+					return
 				}
+				results <- segment
 			}
-
-			// Upload chunk
-			messageID, err := client.PostArticle(
-				postingConfig.Posting.Group,
-				subject,
-				fmt.Sprintf("%s <%s>", postingConfig.Posting.PosterName, postingConfig.Posting.PosterEmail),
-				encoded,
-				postingConfig.Posting.CustomHeaders,
-			)
-			
-			if err != nil {
-				return nil, fmt.Errorf("failed to post chunk %d of part %d: %w", chunkIndex+1, part.PartNumber, err)
-			}
-
-			segment := &models.PostSegment{
-				MessageID:   messageID,
-				PartNumber:  chunkNumber, // Use chunk number for NZB
-				TotalParts:  totalChunks, // Total chunks for NZB
-				FileName:    part.FileName,
-				Subject:     subject,
-				PostedAt:    time.Now(),
-				BytesPosted: int64(len(chunkData)),
-			}
-			
-			segments = append(segments, segment)
-			
-			// Emit real-time progress
-			tracker.EmitProgress(chunkNumber, int64(len(chunkData)))
-			
-			log.LogUploadProgress(part.FileName, chunkNumber, totalChunks, int64(len(chunkData)))
-			
-			chunkNumber++
+		}(i)
+	}
+	
+	// Send all jobs to workers
+	go func() {
+		defer close(jobs)
+		for _, job := range allJobs {
+			jobs <- job
 		}
+	}()
+	
+	// Collect results
+	var segments []*models.PostSegment
+	var uploadErrors []error
+	
+	for i := 0; i < len(allJobs); i++ {
+		select {
+		case segment := <-results:
+			segments = append(segments, segment)
+		case err := <-errors:
+			uploadErrors = append(uploadErrors, err)
+		}
+	}
+	
+	// Wait for all workers to complete
+	wg.Wait()
+	
+	// Check for errors
+	if len(uploadErrors) > 0 {
+		return nil, fmt.Errorf("upload failed with %d errors: %v", len(uploadErrors), uploadErrors[0])
 	}
 	
 	// Emit completion message
 	tracker.EmitComplete()
-
+	
+	log.Info("Successfully uploaded %d chunks using %d parallel connections", len(segments), numWorkers)
+	
 	return segments, nil
+}
+
+// uploadChunk handles uploading a single chunk
+func uploadChunk(pool *nntp.ConnectionPool, job uploadJob, postingConfig models.Config, yencEnc *yenc.Encoder, log *logger.Logger, tracker *progress.Tracker) (*models.PostSegment, error) {
+	client, err := pool.GetClient()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get client: %w", err)
+	}
+
+	// Join group
+	if err := client.JoinGroup(postingConfig.Posting.Group); err != nil {
+		return nil, fmt.Errorf("failed to join group: %w", err)
+	}
+
+	// Encode chunk with proper part information
+	encoded := yencEnc.Encode(job.chunkData, job.part.FileName, job.part.PartNumber, job.totalParts)
+	
+	// Create subject using proper Go template processing
+	subject := postingConfig.Posting.SubjectTemplate
+	if subject == "" {
+		subject = "[{{.Index}}/{{.Total}}] - {{.Filename}} - ({{.Size}}) yEnc ({{.ChunkIndex}}/{{.TotalChunks}})"
+	}
+	
+	// Calculate file size in human-readable format
+	fileSize := float64(job.totalBytes)
+	sizeStr := ""
+	if fileSize >= 1024*1024*1024 {
+		sizeStr = fmt.Sprintf("%.1fGB", fileSize/(1024*1024*1024))
+	} else if fileSize >= 1024*1024 {
+		sizeStr = fmt.Sprintf("%.1fMB", fileSize/(1024*1024))
+	} else if fileSize >= 1024 {
+		sizeStr = fmt.Sprintf("%.1fKB", fileSize/1024)
+	} else {
+		sizeStr = fmt.Sprintf("%dB", int(fileSize))
+	}
+	
+	// Create template data with both part and chunk information
+	templateData := struct {
+		Index       int    // Part number (for file parts like RAR)
+		Total       int    // Total parts
+		Filename    string
+		Size        string
+		ChunkIndex  int    // Chunk number (for NNTP articles)
+		TotalChunks int    // Total chunks
+	}{
+		Index:       job.part.PartNumber,
+		Total:       job.totalParts,
+		Filename:    job.part.FileName,
+		Size:        sizeStr,
+		ChunkIndex:  job.chunkNumber,
+		TotalChunks: job.totalChunks,
+	}
+	
+	// Process template
+	tmpl, err := template.New("subject").Parse(subject)
+	if err != nil {
+		// Fallback to format showing both part and chunk info
+		subject = fmt.Sprintf("(%02d/%02d) - %s - (%s) yEnc (%04d/%04d)",
+			job.part.PartNumber, job.totalParts, job.part.FileName, sizeStr, job.chunkNumber, job.totalChunks)
+	} else {
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, templateData); err != nil {
+			// Fallback to format showing both part and chunk info
+			subject = fmt.Sprintf("(%02d/%02d) - %s - (%s) yEnc (%04d/%04d)",
+				job.part.PartNumber, job.totalParts, job.part.FileName, sizeStr, job.chunkNumber, job.totalChunks)
+		} else {
+			subject = buf.String()
+		}
+	}
+
+	// Upload chunk
+	messageID, err := client.PostArticle(
+		postingConfig.Posting.Group,
+		subject,
+		fmt.Sprintf("%s <%s>", postingConfig.Posting.PosterName, postingConfig.Posting.PosterEmail),
+		encoded,
+		postingConfig.Posting.CustomHeaders,
+	)
+	
+	if err != nil {
+		return nil, fmt.Errorf("failed to post chunk %d of part %d: %w", job.chunkIndex+1, job.part.PartNumber, err)
+	}
+
+	segment := &models.PostSegment{
+		MessageID:   messageID,
+		PartNumber:  job.chunkNumber, // Use chunk number for NZB
+		TotalParts:  job.totalChunks, // Total chunks for NZB
+		FileName:    job.part.FileName,
+		Subject:     subject,
+		PostedAt:    time.Now(),
+		BytesPosted: int64(len(job.chunkData)),
+	}
+	
+	// Emit real-time progress (thread-safe)
+	tracker.EmitProgress(job.chunkNumber, int64(len(job.chunkData)))
+	
+	log.LogUploadProgress(job.part.FileName, job.chunkNumber, job.totalChunks, int64(len(job.chunkData)))
+	
+	return segment, nil
 }
 
 // splitDataIntoChunks splits data into chunks of specified maximum size

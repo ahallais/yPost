@@ -16,9 +16,8 @@ import (
 	"golang.org/x/exp/mmap"
 )
 
-// Alternative Reed-Solomon implementation using klauspost/reedsolomon
-// Uncomment and use this for even better performance:
-// import "github.com/klauspost/reedsolomon"
+// Reed-Solomon implementation using klauspost/reedsolomon
+import "github.com/klauspost/reedsolomon"
 
 // Generator handles PAR2 recovery file generation
 type Generator struct {
@@ -59,8 +58,8 @@ func (g *Generator) CreatePAR2ForParts(parts []string, baseName string, redundan
 	}
 	par2File := filepath.Join(g.par2Path, fmt.Sprintf("%s.par2", baseNameWithoutExt))
 	
-	// Generate recovery data from all parts
-	recoveryData, err := g.generateRecoveryDataFromParts(parts, sliceSize, redundancy)
+	// Generate recovery data from all parts using Reed-Solomon
+	recoveryData, err := g.generateRecoveryDataReedSolomonFromParts(parts, sliceSize, redundancy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate recovery data: %w", err)
 	}
@@ -105,8 +104,8 @@ func (g *Generator) CreatePAR2(filePath string, redundancy int) ([]string, error
 	baseNameWithoutExt := baseName[:len(baseName)-len(filepath.Ext(baseName))]
 	par2File := filepath.Join(g.par2Path, fmt.Sprintf("%s.par2", baseNameWithoutExt))
 	
-	// Generate recovery data
-	recoveryData, err := g.generateRecoveryData(filePath, sliceSize, redundancy)
+	// Generate recovery data using Reed-Solomon
+	recoveryData, err := g.generateRecoveryDataReedSolomon(filePath, sliceSize, redundancy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate recovery data: %w", err)
 	}
@@ -353,9 +352,7 @@ func max(a, b int) int {
 	return b
 }
 
-// Alternative high-performance Reed-Solomon implementation
-// To use this, add "github.com/klauspost/reedsolomon" to go.mod and uncomment:
-/*
+// generateRecoveryDataReedSolomon uses Reed-Solomon encoding for recovery data generation
 func (g *Generator) generateRecoveryDataReedSolomon(filePath string, sliceSize int, redundancy int) ([]byte, error) {
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
@@ -371,6 +368,8 @@ func (g *Generator) generateRecoveryDataReedSolomon(filePath string, sliceSize i
 		parityShards = 1
 	}
 
+	fmt.Printf("Reed-Solomon encoding: %d data shards, %d parity shards\n", numSlices, parityShards)
+
 	// Create Reed-Solomon encoder
 	enc, err := reedsolomon.New(numSlices, parityShards)
 	if err != nil {
@@ -383,6 +382,17 @@ func (g *Generator) generateRecoveryDataReedSolomon(filePath string, sliceSize i
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
 	defer file.Close()
+
+	// Create progress bar
+	progressBar := progressbar.NewOptions(numSlices+parityShards,
+		progressbar.OptionSetDescription("Reed-Solomon encoding"),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetWidth(15),
+		progressbar.OptionSetRenderBlankState(true),
+		progressbar.OptionSetPredictTime(false),
+		progressbar.OptionClearOnFinish(),
+		progressbar.OptionThrottle(200*time.Millisecond),
+	)
 
 	// Create shards
 	shards := make([][]byte, numSlices+parityShards)
@@ -398,6 +408,7 @@ func (g *Generator) generateRecoveryDataReedSolomon(filePath string, sliceSize i
 				shards[i][j] = 0
 			}
 		}
+		progressBar.Add(1)
 	}
 
 	// Initialize parity shards
@@ -411,6 +422,10 @@ func (g *Generator) generateRecoveryDataReedSolomon(filePath string, sliceSize i
 		return nil, fmt.Errorf("failed to encode shards: %w", err)
 	}
 
+	// Update progress for parity generation
+	progressBar.Add(parityShards)
+	progressBar.Finish()
+
 	// Combine parity shards into recovery data
 	recoveryData := make([]byte, parityShards*sliceSize)
 	for i := 0; i < parityShards; i++ {
@@ -419,7 +434,108 @@ func (g *Generator) generateRecoveryDataReedSolomon(filePath string, sliceSize i
 
 	return recoveryData, nil
 }
-*/
+
+// generateRecoveryDataReedSolomonFromParts creates Reed-Solomon recovery data from multiple file parts
+func (g *Generator) generateRecoveryDataReedSolomonFromParts(parts []string, sliceSize int, redundancy int) ([]byte, error) {
+	// Calculate total size of all parts
+	var totalSize int64
+	for _, partPath := range parts {
+		if info, err := os.Stat(partPath); err == nil {
+			totalSize += info.Size()
+		}
+	}
+
+	numSlices := int((totalSize + int64(sliceSize) - 1) / int64(sliceSize))
+	
+	// Calculate parity shards based on redundancy
+	parityShards := int(float64(numSlices) * float64(redundancy) / 100.0)
+	if parityShards < 1 {
+		parityShards = 1
+	}
+
+	fmt.Printf("Reed-Solomon encoding from parts: %d data shards, %d parity shards\n", numSlices, parityShards)
+
+	// Create Reed-Solomon encoder
+	enc, err := reedsolomon.New(numSlices, parityShards)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Reed-Solomon encoder: %w", err)
+	}
+
+	// Create progress bar
+	progressBar := progressbar.NewOptions(numSlices+parityShards,
+		progressbar.OptionSetDescription("Reed-Solomon encoding (parts)"),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetWidth(15),
+		progressbar.OptionSetRenderBlankState(true),
+		progressbar.OptionSetPredictTime(false),
+		progressbar.OptionClearOnFinish(),
+		progressbar.OptionThrottle(200*time.Millisecond),
+	)
+
+	// Create shards
+	shards := make([][]byte, numSlices+parityShards)
+	
+	// Read data from all parts into shards
+	shardIndex := 0
+	for _, partPath := range parts {
+		file, err := os.Open(partPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open part %s: %w", partPath, err)
+		}
+		
+		// Read this part into shards
+		for {
+			if shardIndex >= numSlices {
+				break
+			}
+			
+			shards[shardIndex] = make([]byte, sliceSize)
+			n, err := file.Read(shards[shardIndex])
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				file.Close()
+				return nil, fmt.Errorf("failed to read shard from part %s: %w", partPath, err)
+			}
+			
+			// Pad with zeros if needed
+			if n < sliceSize {
+				for j := n; j < sliceSize; j++ {
+					shards[shardIndex][j] = 0
+				}
+			}
+			
+			shardIndex++
+			progressBar.Add(1)
+		}
+		
+		file.Close()
+	}
+
+	// Initialize remaining parity shards
+	for i := numSlices; i < numSlices+parityShards; i++ {
+		shards[i] = make([]byte, sliceSize)
+	}
+
+	// Generate parity data
+	err = enc.Encode(shards)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode shards: %w", err)
+	}
+
+	// Update progress for parity generation
+	progressBar.Add(parityShards)
+	progressBar.Finish()
+
+	// Combine parity shards into recovery data
+	recoveryData := make([]byte, parityShards*sliceSize)
+	for i := 0; i < parityShards; i++ {
+		copy(recoveryData[i*sliceSize:(i+1)*sliceSize], shards[numSlices+i])
+	}
+
+	return recoveryData, nil
+}
 
 // writePAR2IndexFile writes the main PAR2 index file (control file)
 func (g *Generator) writePAR2IndexFile(par2File string, originalFile string, sliceSize int, numSlices int) error {
