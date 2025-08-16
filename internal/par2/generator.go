@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/schollz/progressbar/v3"
 )
 
 // Generator handles PAR2 recovery file generation
@@ -27,6 +29,9 @@ func (g *Generator) CreatePAR2(filePath string, redundancy int) ([]string, error
 	if err != nil {
 		return nil, fmt.Errorf("failed to stat file: %w", err)
 	}
+
+	fmt.Printf("Creating PAR2 recovery files for: %s\n", fileInfo.Name())
+	fmt.Printf("File size: %d bytes, Redundancy: %d%%\n", fileInfo.Size(), redundancy)
 
 	// Calculate recovery slice parameters
 	fileSize := fileInfo.Size()
@@ -61,6 +66,7 @@ func (g *Generator) CreatePAR2(filePath string, redundancy int) ([]string, error
 		par2Files = append(par2Files, volFiles...)
 	}
 
+	fmt.Printf("PAR2 recovery files created successfully: %d files\n", len(par2Files))
 	return par2Files, nil
 }
 
@@ -91,6 +97,14 @@ func (g *Generator) generateRecoveryData(filePath string, sliceSize int, redunda
 	fileSize := fileInfo.Size()
 	numSlices := int((fileSize + int64(sliceSize) - 1) / int64(sliceSize))
 
+	// Create progress bar for file reading
+	readBar := progressbar.NewOptions(numSlices,
+		progressbar.OptionSetDescription("Reading file slices"),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetWidth(15),
+		progressbar.OptionSetRenderBlankState(true),
+	)
+
 	// Read file in slices
 	slices := make([][]byte, numSlices)
 	for i := 0; i < numSlices; i++ {
@@ -106,6 +120,7 @@ func (g *Generator) generateRecoveryData(filePath string, sliceSize int, redunda
 			}
 		}
 		slices[i] = slice
+		readBar.Add(1)
 	}
 
 	// Generate recovery data (simplified XOR-based approach)
@@ -113,6 +128,14 @@ func (g *Generator) generateRecoveryData(filePath string, sliceSize int, redunda
 	if recoverySize < 1 {
 		recoverySize = 1
 	}
+
+	// Create progress bar for recovery data generation
+	recoveryBar := progressbar.NewOptions(recoverySize*sliceSize,
+		progressbar.OptionSetDescription("Generating recovery data"),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetWidth(15),
+		progressbar.OptionSetRenderBlankState(true),
+	)
 
 	recoveryData := make([]byte, recoverySize*sliceSize)
 	for i := 0; i < recoverySize; i++ {
@@ -122,6 +145,7 @@ func (g *Generator) generateRecoveryData(filePath string, sliceSize int, redunda
 				xor ^= slices[k][j]
 			}
 			recoveryData[i*sliceSize+j] = xor
+			recoveryBar.Add(1)
 		}
 	}
 
@@ -209,8 +233,16 @@ func (g *Generator) createVOLFiles(originalFile string, sliceSize int, numSlices
 	// Create VOL files based on redundancy
 	volCount := (redundancy + 9) / 10 // Create 1 VOL file per 10% redundancy
 	
+	// Create progress bar for VOL file creation
+	volBar := progressbar.NewOptions(volCount,
+		progressbar.OptionSetDescription("Creating VOL files"),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetWidth(15),
+		progressbar.OptionSetRenderBlankState(true),
+	)
+	
 	for i := 1; i <= volCount; i++ {
-		volFile := filepath.Join(filepath.Dir(originalFile), fmt.Sprintf("%s.vol%02d+01.par2", 
+		volFile := filepath.Join(filepath.Dir(originalFile), fmt.Sprintf("%s.vol%02d+01.par2",
 			filepath.Base(originalFile), i))
 		
 		// Generate additional recovery data for this volume
@@ -225,6 +257,7 @@ func (g *Generator) createVOLFiles(originalFile string, sliceSize int, numSlices
 		}
 		
 		volFiles = append(volFiles, volFile)
+		volBar.Add(1)
 	}
 	
 	return volFiles, nil
