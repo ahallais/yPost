@@ -115,4 +115,4 @@ func (g *Generator) generateRecoveryData(filePath string, sliceSize int, redunda
 		progressbar.OptionThrottle(100*time.Millisecond),
 	)
 
-	// Memory-efficient approach: compute XOR incrementally without
+	// Memory-efficient approach: compute XOR incrementally without loading all slices
