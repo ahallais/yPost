@@ -44,3 +44,5 @@ ypost
 ypost-darwin-amd64
 ypost-linux-amd64
 
+#dummy test file
+dummyfile.bin
