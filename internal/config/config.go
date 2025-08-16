@@ -68,8 +68,9 @@ func LoadConfig(configPath string) (*models.Config, string, error) {
 		}
 	}
 
-	// Parse max_file_size and set it to posting.max_part_size if not already set
-	if config.Splitting.MaxFileSize != "" && config.Posting.MaxPartSize == 750000 {
+	// Parse max_file_size and set it to posting.max_part_size
+	// Prioritize splitting.max_file_size over posting.max_part_size
+	if config.Splitting.MaxFileSize != "" {
 		maxPartSize, err := utils.ParseFileSize(config.Splitting.MaxFileSize)
 		if err != nil {
 			return nil, "", fmt.Errorf("invalid max_file_size: %w", err)
