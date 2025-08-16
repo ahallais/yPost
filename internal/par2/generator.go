@@ -32,7 +32,60 @@ func NewGenerator(par2Path string) *Generator {
 	}
 }
 
-// CreatePAR2 creates PAR2 recovery files for the given file
+// CreatePAR2ForParts creates PAR2 recovery files for split file parts (standard practice)
+func (g *Generator) CreatePAR2ForParts(parts []string, baseName string, redundancy int) ([]string, error) {
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("no parts provided")
+	}
+
+	fmt.Printf("Creating PAR2 recovery files for %d parts of: %s\n", len(parts), baseName)
+	fmt.Printf("Redundancy: %d%%\n", redundancy)
+
+	// Calculate total size of all parts
+	var totalSize int64
+	for _, partPath := range parts {
+		if info, err := os.Stat(partPath); err == nil {
+			totalSize += info.Size()
+		}
+	}
+
+	// Use a reasonable slice size for the parts
+	sliceSize := g.calculateSliceSize(totalSize)
+	
+	// Create main PAR2 index file
+	baseNameWithoutExt := baseName
+	if ext := filepath.Ext(baseName); ext != "" {
+		baseNameWithoutExt = baseName[:len(baseName)-len(ext)]
+	}
+	par2File := filepath.Join(g.par2Path, fmt.Sprintf("%s.par2", baseNameWithoutExt))
+	
+	// Generate recovery data from all parts
+	recoveryData, err := g.generateRecoveryDataFromParts(parts, sliceSize, redundancy)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate recovery data: %w", err)
+	}
+
+	// Write main PAR2 index file (control file with file list)
+	err = g.writePAR2IndexFileForParts(par2File, parts, sliceSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write PAR2 index file: %w", err)
+	}
+
+	var par2Files []string
+	par2Files = append(par2Files, par2File)
+
+	// Create VOL files with recovery blocks following standard naming
+	volFiles, err := g.createStandardVOLFiles(baseNameWithoutExt, recoveryData, sliceSize, redundancy)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create VOL files: %w", err)
+	}
+	par2Files = append(par2Files, volFiles...)
+
+	fmt.Printf("PAR2 recovery files created successfully: %d files\n", len(par2Files))
+	return par2Files, nil
+}
+
+// CreatePAR2 creates PAR2 recovery files for the given file parts
 func (g *Generator) CreatePAR2(filePath string, redundancy int) ([]string, error) {
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
@@ -47,8 +100,10 @@ func (g *Generator) CreatePAR2(filePath string, redundancy int) ([]string, error
 	sliceSize := g.calculateSliceSize(fileSize)
 	numSlices := int((fileSize + int64(sliceSize) - 1) / int64(sliceSize))
 
-	// Create PAR2 file
-	par2File := filepath.Join(filepath.Dir(filePath), fmt.Sprintf("%s.par2", fileInfo.Name()))
+	// Create main PAR2 index file
+	baseName := filepath.Base(filePath)
+	baseNameWithoutExt := baseName[:len(baseName)-len(filepath.Ext(baseName))]
+	par2File := filepath.Join(g.par2Path, fmt.Sprintf("%s.par2", baseNameWithoutExt))
 	
 	// Generate recovery data
 	recoveryData, err := g.generateRecoveryData(filePath, sliceSize, redundancy)
@@ -56,24 +111,21 @@ func (g *Generator) CreatePAR2(filePath string, redundancy int) ([]string, error
 		return nil, fmt.Errorf("failed to generate recovery data: %w", err)
 	}
 
-	// Write PAR2 file
-	err = g.writePAR2File(par2File, filePath, sliceSize, numSlices, recoveryData)
+	// Write main PAR2 index file (small control file)
+	err = g.writePAR2IndexFile(par2File, filePath, sliceSize, numSlices)
 	if err != nil {
-		return nil, fmt.Errorf("failed to write PAR2 file: %w", err)
+		return nil, fmt.Errorf("failed to write PAR2 index file: %w", err)
 	}
 
-	// Create additional recovery volumes if needed
 	var par2Files []string
 	par2Files = append(par2Files, par2File)
 
-	// Create VOL files for additional redundancy
-	if redundancy > 10 {
-		volFiles, err := g.createVOLFiles(filePath, sliceSize, numSlices, redundancy)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create VOL files: %w", err)
-		}
-		par2Files = append(par2Files, volFiles...)
+	// Create VOL files with recovery blocks following standard naming
+	volFiles, err := g.createStandardVOLFiles(baseNameWithoutExt, recoveryData, sliceSize, redundancy)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create VOL files: %w", err)
 	}
+	par2Files = append(par2Files, volFiles...)
 
 	fmt.Printf("PAR2 recovery files created successfully: %d files\n", len(par2Files))
 	return par2Files, nil
@@ -369,11 +421,38 @@ func (g *Generator) generateRecoveryDataReedSolomon(filePath string, sliceSize i
 }
 */
 
-// writePAR2File writes the PAR2 file with proper format
-func (g *Generator) writePAR2File(par2File string, originalFile string, sliceSize int, numSlices int, recoveryData []byte) error {
+// writePAR2IndexFile writes the main PAR2 index file (control file)
+func (g *Generator) writePAR2IndexFile(par2File string, originalFile string, sliceSize int, numSlices int) error {
 	file, err := os.Create(par2File)
 	if err != nil {
-		return fmt.Errorf("failed to create PAR2 file: %w", err)
+		return fmt.Errorf("failed to create PAR2 index file: %w", err)
+	}
+	defer file.Close()
+
+	// Write PAR2 header
+	header := []byte("PAR2\x00PKT")
+	if _, err := file.Write(header); err != nil {
+		return fmt.Errorf("failed to write PAR2 header: %w", err)
+	}
+
+	// Write file description packet
+	fileInfo, _ := os.Stat(originalFile)
+	fileHash := g.calculateFileHash(originalFile)
+
+	// Create file description
+	desc := g.createFileDescription(originalFile, fileInfo.Size(), sliceSize, numSlices, fileHash)
+	if _, err := file.Write(desc); err != nil {
+		return fmt.Errorf("failed to write file description: %w", err)
+	}
+
+	return nil
+}
+
+// writePAR2VolumeFile writes a PAR2 volume file with recovery data
+func (g *Generator) writePAR2VolumeFile(volFile string, originalFile string, sliceSize int, numSlices int, recoveryData []byte) error {
+	file, err := os.Create(volFile)
+	if err != nil {
+		return fmt.Errorf("failed to create PAR2 volume file: %w", err)
 	}
 	defer file.Close()
 
@@ -443,16 +522,24 @@ func (g *Generator) createFileDescription(filename string, fileSize int64, slice
 	return desc
 }
 
-// createVOLFiles creates additional recovery volume files
-func (g *Generator) createVOLFiles(originalFile string, sliceSize int, numSlices int, redundancy int) ([]string, error) {
+// createStandardVOLFiles creates PAR2 volume files following standard naming convention
+func (g *Generator) createStandardVOLFiles(baseName string, recoveryData []byte, sliceSize int, redundancy int) ([]string, error) {
 	var volFiles []string
 	
-	// Create VOL files based on redundancy
-	volCount := (redundancy + 9) / 10 // Create 1 VOL file per 10% redundancy
+	// Calculate how many recovery blocks we have
+	totalRecoveryBlocks := len(recoveryData) / sliceSize
+	if totalRecoveryBlocks == 0 {
+		return volFiles, nil
+	}
+	
+	// Create volume files following standard PAR2 naming: file.vol000+01.par2, file.vol001+02.par2, etc.
+	// This creates a series of volumes with increasing block counts (powers of 2 pattern)
+	blockIndex := 0
+	volIndex := 0
 	
 	// Create progress bar for VOL file creation
-	volBar := progressbar.NewOptions(volCount,
-		progressbar.OptionSetDescription("Creating VOL files"),
+	volBar := progressbar.NewOptions(totalRecoveryBlocks,
+		progressbar.OptionSetDescription("Creating PAR2 volumes"),
 		progressbar.OptionShowCount(),
 		progressbar.OptionSetWidth(15),
 		progressbar.OptionSetRenderBlankState(true),
@@ -461,26 +548,63 @@ func (g *Generator) createVOLFiles(originalFile string, sliceSize int, numSlices
 		progressbar.OptionThrottle(100*time.Millisecond),
 	)
 	
-	for i := 1; i <= volCount; i++ {
-		volFile := filepath.Join(filepath.Dir(originalFile), fmt.Sprintf("%s.vol%02d+01.par2",
-			filepath.Base(originalFile), i))
-		
-		// Generate additional recovery data for this volume
-		recoveryData, err := g.generateRecoveryData(originalFile, sliceSize, 10)
-		if err != nil {
-			return nil, err
+	for blockIndex < totalRecoveryBlocks {
+		// Calculate blocks for this volume (start with 1, then powers of 2: 1, 2, 4, 8, ...)
+		var blocksInVolume int
+		if volIndex == 0 {
+			blocksInVolume = 1
+		} else {
+			blocksInVolume = 1 << (volIndex - 1) // Powers of 2: 1, 2, 4, 8, 16...
 		}
 		
-		err = g.writePAR2File(volFile, originalFile, sliceSize, numSlices, recoveryData)
+		// Don't exceed remaining blocks
+		if blockIndex + blocksInVolume > totalRecoveryBlocks {
+			blocksInVolume = totalRecoveryBlocks - blockIndex
+		}
+		
+		// Create volume file name
+		volFile := filepath.Join(g.par2Path, fmt.Sprintf("%s.vol%03d+%02d.par2", baseName, blockIndex, blocksInVolume))
+		
+		// Extract recovery data for this volume
+		volumeData := recoveryData[blockIndex*sliceSize:(blockIndex+blocksInVolume)*sliceSize]
+		
+		// Write volume file
+		err := g.writeVolumeFile(volFile, volumeData)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to write volume file %s: %w", volFile, err)
 		}
 		
 		volFiles = append(volFiles, volFile)
-		volBar.Add(1)
+		blockIndex += blocksInVolume
+		volIndex++
+		
+		volBar.Add(blocksInVolume)
 	}
 	
+	volBar.Finish()
 	return volFiles, nil
+}
+
+// writeVolumeFile writes a PAR2 volume file with just the recovery data
+func (g *Generator) writeVolumeFile(volFile string, recoveryData []byte) error {
+	file, err := os.Create(volFile)
+	if err != nil {
+		return fmt.Errorf("failed to create volume file: %w", err)
+	}
+	defer file.Close()
+
+	// Write PAR2 header
+	header := []byte("PAR2\x00PKT")
+	if _, err := file.Write(header); err != nil {
+		return fmt.Errorf("failed to write PAR2 header: %w", err)
+	}
+
+	// Write recovery data
+	if _, err := file.Write(recoveryData); err != nil {
+		return fmt.Errorf("failed to write recovery data: %w", err)
+	}
+
+	return nil
 }
 
 // VerifyPAR2 verifies the integrity of a file using PAR2 data
@@ -508,6 +632,142 @@ func (g *Generator) extractHashFromPAR2(par2Data []byte) []byte {
 	if len(par2Data) > 64 {
 		return par2Data[len(par2Data)-32:] // Last 32 bytes as hash
 	}
+	return nil
+}
+
+// generateRecoveryDataFromParts creates recovery data from multiple file parts
+func (g *Generator) generateRecoveryDataFromParts(parts []string, sliceSize int, redundancy int) ([]byte, error) {
+	// Calculate total size of all parts
+	var totalSize int64
+	for _, partPath := range parts {
+		if info, err := os.Stat(partPath); err == nil {
+			totalSize += info.Size()
+		}
+	}
+
+	numSlices := int((totalSize + int64(sliceSize) - 1) / int64(sliceSize))
+	
+	// Calculate recovery size based on redundancy
+	recoverySlices := int(float64(numSlices) * float64(redundancy) / 100.0)
+	if recoverySlices < 1 {
+		recoverySlices = 1
+	}
+
+	fmt.Printf("Generating recovery data: %d slices, %d recovery slices\n", numSlices, recoverySlices)
+
+	// Create progress bar
+	progressBar := progressbar.NewOptions(recoverySlices,
+		progressbar.OptionSetDescription("Generating recovery data"),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetWidth(15),
+		progressbar.OptionSetRenderBlankState(true),
+		progressbar.OptionSetPredictTime(false),
+		progressbar.OptionClearOnFinish(),
+		progressbar.OptionThrottle(200*time.Millisecond),
+	)
+
+	recoveryData := make([]byte, recoverySlices*sliceSize)
+	
+	// Process each recovery slice
+	for i := 0; i < recoverySlices; i++ {
+		recoverySlice := recoveryData[i*sliceSize:(i+1)*sliceSize]
+		
+		// Clear recovery slice
+		for j := range recoverySlice {
+			recoverySlice[j] = 0
+		}
+		
+		// XOR data from all parts
+		sliceOffset := 0
+		for _, partPath := range parts {
+			err := g.xorPartIntoRecoverySlice(partPath, sliceOffset, sliceSize, numSlices, recoverySlice)
+			if err != nil {
+				return nil, fmt.Errorf("failed to process part %s: %w", partPath, err)
+			}
+			
+			// Update slice offset for next part
+			if info, err := os.Stat(partPath); err == nil {
+				partSlices := int((info.Size() + int64(sliceSize) - 1) / int64(sliceSize))
+				sliceOffset += partSlices
+			}
+		}
+		
+		progressBar.Add(1)
+	}
+	
+	progressBar.Finish()
+	return recoveryData, nil
+}
+
+// xorPartIntoRecoverySlice XORs data from a part file into the recovery slice
+func (g *Generator) xorPartIntoRecoverySlice(partPath string, sliceOffset int, sliceSize int, totalSlices int, recoverySlice []byte) error {
+	file, err := os.Open(partPath)
+	if err != nil {
+		return fmt.Errorf("failed to open part file: %w", err)
+	}
+	defer file.Close()
+
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat part file: %w", err)
+	}
+
+	fileSize := fileInfo.Size()
+	partSlices := int((fileSize + int64(sliceSize) - 1) / int64(sliceSize))
+	
+	// Read and XOR each slice from this part
+	for i := 0; i < partSlices; i++ {
+		slice := make([]byte, sliceSize)
+		n, err := file.Read(slice)
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("failed to read slice: %w", err)
+		}
+		
+		// Pad with zeros if needed
+		if n < sliceSize {
+			for k := n; k < sliceSize; k++ {
+				slice[k] = 0
+			}
+		}
+		
+		// XOR with recovery slice
+		g.xorBytes(recoverySlice, slice)
+	}
+	
+	return nil
+}
+
+// writePAR2IndexFileForParts writes the main PAR2 index file for multiple parts
+func (g *Generator) writePAR2IndexFileForParts(par2File string, parts []string, sliceSize int) error {
+	file, err := os.Create(par2File)
+	if err != nil {
+		return fmt.Errorf("failed to create PAR2 index file: %w", err)
+	}
+	defer file.Close()
+
+	// Write PAR2 header
+	header := []byte("PAR2\x00PKT")
+	if _, err := file.Write(header); err != nil {
+		return fmt.Errorf("failed to write PAR2 header: %w", err)
+	}
+
+	// Write file descriptions for all parts
+	for _, partPath := range parts {
+		fileInfo, err := os.Stat(partPath)
+		if err != nil {
+			continue // Skip missing parts
+		}
+		
+		fileHash := g.calculateFileHash(partPath)
+		numSlices := int((fileInfo.Size() + int64(sliceSize) - 1) / int64(sliceSize))
+		
+		// Create file description for this part
+		desc := g.createFileDescription(partPath, fileInfo.Size(), sliceSize, numSlices, fileHash)
+		if _, err := file.Write(desc); err != nil {
+			return fmt.Errorf("failed to write file description for %s: %w", partPath, err)
+		}
+	}
+
 	return nil
 }
 

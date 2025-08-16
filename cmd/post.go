@@ -172,11 +172,19 @@ if createSFV || cfg.Features.CreateSFV {
 
 	log.LogFileSplit(filePath, len(parts), sumPartSizes(parts))
 
-	// Create PAR2 files if enabled
+	// Create PAR2 files if enabled - use split parts for standard practice
 	var par2Files []string
 	if par2Gen != nil {
 		log.Info("Creating PAR2 recovery files...")
-		par2Files, err = par2Gen.CreatePAR2(filePath, redundancy)
+		
+		// Collect part file paths for PAR2 generation
+		var partPaths []string
+		for _, part := range parts {
+			partPaths = append(partPaths, part.FilePath)
+		}
+		
+		// Create PAR2 files for the split parts (standard practice)
+		par2Files, err = par2Gen.CreatePAR2ForParts(partPaths, filepath.Base(filePath), redundancy)
 		if err != nil {
 			log.Error("Failed to create PAR2 files: %v", err)
 		} else {
@@ -192,8 +200,10 @@ if createSFV || cfg.Features.CreateSFV {
 		// Collect paths of all files to include in SFV
 		var allFilePaths []string
 		
-		// Add the original file
-		allFilePaths = append(allFilePaths, filePath)
+		// Add the split part files (standard practice)
+		for _, part := range parts {
+			allFilePaths = append(allFilePaths, part.FilePath)
+		}
 		
 		// Add PAR2 files
 		allFilePaths = append(allFilePaths, par2Files...)
