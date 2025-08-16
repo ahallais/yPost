@@ -13,15 +13,13 @@ import (
 
 // Splitter handles file splitting operations
 type Splitter struct {
-	maxPartSize   int64
-	maxLineLength int
+	maxPartSize int64
 }
 
 // NewSplitter creates a new file splitter
-func NewSplitter(maxPartSize int64, maxLineLength int) *Splitter {
+func NewSplitter(maxPartSize int64) *Splitter {
 	return &Splitter{
-		maxPartSize:   maxPartSize,
-		maxLineLength: maxLineLength,
+		maxPartSize: maxPartSize,
 	}
 }
 

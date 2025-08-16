@@ -141,7 +141,7 @@ if err := os.MkdirAll(unifiedOutputDir, 0755); err != nil {
 }
 
 // Initialize components
-split := splitter.NewSplitter(cfg.Posting.MaxPartSize, cfg.Posting.MaxLineLength)
+split := splitter.NewSplitter(cfg.Posting.MaxPartSize)
 yencEnc := yenc.Encoder{}
 
 // Use the "from" value from config for NZB poster
