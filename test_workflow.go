@@ -47,25 +47,37 @@ func testCompleteWorkflow() {
 
 	// Test file splitting
 	fmt.Println("1. Testing file splitting...")
-	parts, err := split.SplitFile(testFile)
+	parts, err := split.SplitFile(testFile, outputDir)
 	if err != nil {
 		fmt.Printf("Failed to split file: %v\n", err)
 		return
 	}
 	fmt.Printf("   File split into %d parts\n", len(parts))
 
-	// Test PAR2 generation
-	fmt.Println("2. Testing PAR2 generation...")
-	par2Files, err := par2Gen.CreatePAR2(testFile, 15) // 15% redundancy
+	// Test PAR2 generation for split parts (standard practice)
+	fmt.Println("2. Testing PAR2 generation for split parts...")
+	var partPaths []string
+	for _, part := range parts {
+		partPaths = append(partPaths, part.FilePath)
+	}
+	par2Files, err := par2Gen.CreatePAR2ForParts(partPaths, filepath.Base(testFile), 15) // 15% redundancy
 	if err != nil {
 		fmt.Printf("Failed to create PAR2 files: %v\n", err)
 		return
 	}
 	fmt.Printf("   Created %d PAR2 files: %v\n", len(par2Files), par2Files)
 
-	// Test SFV creation
-	fmt.Println("3. Testing SFV creation...")
-	sfvPath, err := sfvGen.CreateSFV([]string{testFile}, "test_file.sfv")
+	// Test SFV creation for split parts
+	fmt.Println("3. Testing SFV creation for split parts...")
+	var allFilePaths []string
+	// Add part files
+	for _, part := range parts {
+		allFilePaths = append(allFilePaths, part.FilePath)
+	}
+	// Add PAR2 files
+	allFilePaths = append(allFilePaths, par2Files...)
+	
+	sfvPath, err := sfvGen.CreateSFV(allFilePaths, "test_file.sfv")
 	if err != nil {
 		fmt.Printf("Failed to create SFV file: %v\n", err)
 		return
@@ -76,7 +88,13 @@ func testCompleteWorkflow() {
 	fmt.Println("4. Simulating posting segments...")
 	var segments []*models.PostSegment
 	for i, part := range parts {
-		encoded := yencEnc.Encode(part.Data, part.FileName, part.PartNumber, len(parts))
+		// Read data from file since it's no longer stored in memory
+		data, err := os.ReadFile(part.FilePath)
+		if err != nil {
+			fmt.Printf("Failed to read part file: %v\n", err)
+			continue
+		}
+		encoded := yencEnc.Encode(data, part.FileName, part.PartNumber, len(parts))
 		segment := &models.PostSegment{
 			MessageID:   fmt.Sprintf("<test-%d@example.com>", i),
 			PartNumber:  part.PartNumber,
@@ -92,13 +110,18 @@ func testCompleteWorkflow() {
 	// Simulate posting PAR2 files
 	var par2Segments []*models.PostSegment
 	for _, par2File := range par2Files {
-		par2Parts, err := split.SplitFile(par2File)
+		par2Parts, err := split.SplitFile(par2File, outputDir)
 		if err != nil {
 			fmt.Printf("Failed to split PAR2 file: %v\n", err)
 			continue
 		}
 		for i, part := range par2Parts {
-			encoded := yencEnc.Encode(part.Data, part.FileName, part.PartNumber, len(par2Parts))
+			data, err := os.ReadFile(part.FilePath)
+			if err != nil {
+				fmt.Printf("Failed to read PAR2 part file: %v\n", err)
+				continue
+			}
+			encoded := yencEnc.Encode(data, part.FileName, part.PartNumber, len(par2Parts))
 			segment := &models.PostSegment{
 				MessageID:   fmt.Sprintf("<par2-%d-%d@example.com>", i, part.PartNumber),
 				PartNumber:  part.PartNumber,
@@ -114,10 +137,15 @@ func testCompleteWorkflow() {
 
 	// Simulate posting SFV file
 	var sfvSegments []*models.PostSegment
-	sfvParts, err := split.SplitFile(sfvPath)
+	sfvParts, err := split.SplitFile(sfvPath, outputDir)
 	if err == nil {
 		for i, part := range sfvParts {
-			encoded := yencEnc.Encode(part.Data, part.FileName, part.PartNumber, len(sfvParts))
+			data, err := os.ReadFile(part.FilePath)
+			if err != nil {
+				fmt.Printf("Failed to read SFV part file: %v\n", err)
+				continue
+			}
+			encoded := yencEnc.Encode(data, part.FileName, part.PartNumber, len(sfvParts))
 			segment := &models.PostSegment{
 				MessageID:   fmt.Sprintf("<sfv-%d-%d@example.com>", i, part.PartNumber),
 				PartNumber:  part.PartNumber,
