@@ -31,8 +31,9 @@ func GenerateTimestampedFolderName(filename string) string {
 func GetUnifiedOutputPath(outputDir, filename string) string {
 	folderName := GenerateTimestampedFolderName(filename)
 	return filepath.Join(outputDir, folderName)
-}//
- ParseFileSize parses a file size string (e.g., "50MB", "1.5GB") into bytes
+}
+
+// ParseFileSize parses a file size string (e.g., "50MB", "1.5GB") into bytes
 func ParseFileSize(sizeStr string) (int64, error) {
 	if sizeStr == "" {
 		return 0, fmt.Errorf("empty size string")
