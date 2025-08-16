@@ -7,10 +7,18 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/schollz/progressbar/v3"
+	"golang.org/x/exp/mmap"
 )
+
+// Alternative Reed-Solomon implementation using klauspost/reedsolomon
+// Uncomment and use this for even better performance:
+// import "github.com/klauspost/reedsolomon"
 
 // Generator handles PAR2 recovery file generation
 type Generator struct {
@@ -86,78 +94,280 @@ func (g *Generator) calculateSliceSize(fileSize int64) int {
 	}
 }
 
-// generateRecoveryData creates recovery data using Reed-Solomon-like algorithm
+// generateRecoveryData creates recovery data using optimized memory-mapped approach
 func (g *Generator) generateRecoveryData(filePath string, sliceSize int, redundancy int) ([]byte, error) {
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	fileSize := fileInfo.Size()
+	numSlices := int((fileSize + int64(sliceSize) - 1) / int64(sliceSize))
+
+	// Calculate recovery size
+	recoverySize := int(float64(numSlices) * float64(redundancy) / 100.0)
+	if recoverySize < 1 {
+		recoverySize = 1
+	}
+
+	// Use memory mapping for large files (>10MB), otherwise use streaming
+	if fileSize > 10*1024*1024 {
+		return g.generateRecoveryDataMmap(filePath, sliceSize, numSlices, recoverySize)
+	}
+	return g.generateRecoveryDataStream(filePath, sliceSize, numSlices, recoverySize)
+}
+
+// generateRecoveryDataMmap uses memory mapping for efficient file access
+func (g *Generator) generateRecoveryDataMmap(filePath string, sliceSize, numSlices, recoverySize int) ([]byte, error) {
+	// Memory map the file
+	reader, err := mmap.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to mmap file: %w", err)
+	}
+	defer reader.Close()
+
+	// Read all data from mmap reader
+	data := make([]byte, reader.Len())
+	_, err = reader.ReadAt(data, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read mmap data: %w", err)
+	}
+	
+	// Create progress bar with throttled updates
+	progressBar := progressbar.NewOptions(recoverySize,
+		progressbar.OptionSetDescription("Generating recovery data (mmap)"),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetWidth(15),
+		progressbar.OptionSetRenderBlankState(true),
+		progressbar.OptionSetPredictTime(false),
+		progressbar.OptionClearOnFinish(),
+		progressbar.OptionThrottle(200*time.Millisecond),
+	)
+
+	recoveryData := make([]byte, recoverySize*sliceSize)
+	
+	// Use parallel processing for XOR computation
+	numWorkers := runtime.NumCPU()
+	var wg sync.WaitGroup
+	
+	// Process recovery blocks in parallel
+	for i := 0; i < recoverySize; i++ {
+		wg.Add(1)
+		go func(recoveryIndex int) {
+			defer wg.Done()
+			
+			// Calculate XOR for this recovery block
+			recoverySlice := recoveryData[recoveryIndex*sliceSize:(recoveryIndex+1)*sliceSize]
+			g.xorSlicesFromMmap(data, sliceSize, numSlices, recoverySlice)
+			
+			// Throttled progress update
+			if recoveryIndex%max(1, recoverySize/100) == 0 {
+				progressBar.Add(1)
+			}
+		}(i)
+		
+		// Limit concurrent goroutines to prevent memory pressure
+		if (i+1)%numWorkers == 0 {
+			wg.Wait()
+		}
+	}
+	wg.Wait()
+	
+	progressBar.Finish()
+	return recoveryData, nil
+}
+
+// generateRecoveryDataStream uses streaming approach for smaller files
+func (g *Generator) generateRecoveryDataStream(filePath string, sliceSize, numSlices, recoverySize int) ([]byte, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
 	defer file.Close()
 
-	fileInfo, _ := file.Stat()
-	fileSize := fileInfo.Size()
-	numSlices := int((fileSize + int64(sliceSize) - 1) / int64(sliceSize))
-
-	// Create progress bar for file reading
-	readBar := progressbar.NewOptions(numSlices,
-		progressbar.OptionSetDescription("Reading file slices"),
+	// Create progress bar
+	progressBar := progressbar.NewOptions(recoverySize,
+		progressbar.OptionSetDescription("Generating recovery data (stream)"),
 		progressbar.OptionShowCount(),
 		progressbar.OptionSetWidth(15),
 		progressbar.OptionSetRenderBlankState(true),
 		progressbar.OptionSetPredictTime(false),
 		progressbar.OptionClearOnFinish(),
-		progressbar.OptionThrottle(100*time.Millisecond),
-	)
-
-	// Read file in slices
-	slices := make([][]byte, numSlices)
-	for i := 0; i < numSlices; i++ {
-		slice := make([]byte, sliceSize)
-		n, err := file.Read(slice)
-		if err != nil && err != io.EOF {
-			return nil, fmt.Errorf("failed to read file slice: %w", err)
-		}
-		if n < sliceSize {
-			// Pad last slice with zeros
-			for j := n; j < sliceSize; j++ {
-				slice[j] = 0
-			}
-		}
-		slices[i] = slice
-		readBar.Add(1)
-	}
-
-	// Generate recovery data (simplified XOR-based approach)
-	recoverySize := int(float64(numSlices) * float64(redundancy) / 100.0)
-	if recoverySize < 1 {
-		recoverySize = 1
-	}
-
-	// Create progress bar for recovery data generation
-	recoveryBar := progressbar.NewOptions(recoverySize*sliceSize,
-		progressbar.OptionSetDescription("Generating recovery data"),
-		progressbar.OptionShowCount(),
-		progressbar.OptionSetWidth(15),
-		progressbar.OptionSetRenderBlankState(true),
-		progressbar.OptionSetPredictTime(false),
-		progressbar.OptionClearOnFinish(),
-		progressbar.OptionThrottle(100*time.Millisecond),
+		progressbar.OptionThrottle(200*time.Millisecond),
 	)
 
 	recoveryData := make([]byte, recoverySize*sliceSize)
+	
+	// Process each recovery block
 	for i := 0; i < recoverySize; i++ {
-		for j := 0; j < sliceSize; j++ {
-			var xor byte
-			for k := 0; k < numSlices; k++ {
-				xor ^= slices[k][j]
+		recoverySlice := recoveryData[i*sliceSize:(i+1)*sliceSize]
+		
+		// Reset file position
+		file.Seek(0, 0)
+		
+		// XOR all slices for this recovery block
+		for j := 0; j < numSlices; j++ {
+			slice := make([]byte, sliceSize)
+			n, err := file.Read(slice)
+			if err != nil && err != io.EOF {
+				return nil, fmt.Errorf("failed to read slice: %w", err)
 			}
-			recoveryData[i*sliceSize+j] = xor
-			recoveryBar.Add(1)
+			
+			// Pad with zeros if needed
+			if n < sliceSize {
+				for k := n; k < sliceSize; k++ {
+					slice[k] = 0
+				}
+			}
+			
+			// XOR with recovery slice
+			g.xorBytes(recoverySlice, slice)
 		}
+		
+		progressBar.Add(1)
+	}
+	
+	return recoveryData, nil
+}
+
+// xorSlicesFromMmap efficiently XORs slices from memory-mapped data
+func (g *Generator) xorSlicesFromMmap(data []byte, sliceSize, numSlices int, result []byte) {
+	// Clear result slice
+	for i := range result {
+		result[i] = 0
+	}
+	
+	dataLen := len(data)
+	
+	// XOR each slice
+	for sliceIdx := 0; sliceIdx < numSlices; sliceIdx++ {
+		offset := sliceIdx * sliceSize
+		
+		// Handle last slice which might be shorter
+		actualSliceSize := sliceSize
+		if offset+sliceSize > dataLen {
+			actualSliceSize = dataLen - offset
+		}
+		
+		if actualSliceSize <= 0 {
+			break
+		}
+		
+		// Use SIMD-optimized XOR for better performance
+		g.xorBytesOptimized(result[:actualSliceSize], data[offset:offset+actualSliceSize])
+	}
+}
+
+// xorBytes performs XOR operation between two byte slices
+func (g *Generator) xorBytes(dst, src []byte) {
+	minLen := len(dst)
+	if len(src) < minLen {
+		minLen = len(src)
+	}
+	
+	for i := 0; i < minLen; i++ {
+		dst[i] ^= src[i]
+	}
+}
+
+// xorBytesOptimized performs optimized XOR using word-sized operations
+func (g *Generator) xorBytesOptimized(dst, src []byte) {
+	minLen := len(dst)
+	if len(src) < minLen {
+		minLen = len(src)
+	}
+	
+	// Process 8 bytes at a time for better performance
+	i := 0
+	for i+8 <= minLen {
+		dstPtr := (*uint64)(unsafe.Pointer(&dst[i]))
+		srcPtr := (*uint64)(unsafe.Pointer(&src[i]))
+		*dstPtr ^= *srcPtr
+		i += 8
+	}
+	
+	// Handle remaining bytes
+	for i < minLen {
+		dst[i] ^= src[i]
+		i++
+	}
+}
+
+// max returns the maximum of two integers
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// Alternative high-performance Reed-Solomon implementation
+// To use this, add "github.com/klauspost/reedsolomon" to go.mod and uncomment:
+/*
+func (g *Generator) generateRecoveryDataReedSolomon(filePath string, sliceSize int, redundancy int) ([]byte, error) {
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	fileSize := fileInfo.Size()
+	numSlices := int((fileSize + int64(sliceSize) - 1) / int64(sliceSize))
+	
+	// Calculate parity shards based on redundancy
+	parityShards := int(float64(numSlices) * float64(redundancy) / 100.0)
+	if parityShards < 1 {
+		parityShards = 1
+	}
+
+	// Create Reed-Solomon encoder
+	enc, err := reedsolomon.New(numSlices, parityShards)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Reed-Solomon encoder: %w", err)
+	}
+
+	// Read file data into shards
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	// Create shards
+	shards := make([][]byte, numSlices+parityShards)
+	for i := 0; i < numSlices; i++ {
+		shards[i] = make([]byte, sliceSize)
+		n, err := file.Read(shards[i])
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("failed to read shard: %w", err)
+		}
+		// Pad with zeros if needed
+		if n < sliceSize {
+			for j := n; j < sliceSize; j++ {
+				shards[i][j] = 0
+			}
+		}
+	}
+
+	// Initialize parity shards
+	for i := numSlices; i < numSlices+parityShards; i++ {
+		shards[i] = make([]byte, sliceSize)
+	}
+
+	// Generate parity data
+	err = enc.Encode(shards)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode shards: %w", err)
+	}
+
+	// Combine parity shards into recovery data
+	recoveryData := make([]byte, parityShards*sliceSize)
+	for i := 0; i < parityShards; i++ {
+		copy(recoveryData[i*sliceSize:(i+1)*sliceSize], shards[numSlices+i])
 	}
 
 	return recoveryData, nil
 }
+*/
 
 // writePAR2File writes the PAR2 file with proper format
 func (g *Generator) writePAR2File(par2File string, originalFile string, sliceSize int, numSlices int, recoveryData []byte) error {
