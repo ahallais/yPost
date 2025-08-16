@@ -17,13 +17,16 @@ import (
 func testCompleteWorkflow() {
 	fmt.Println("Testing complete NZB posting workflow...")
 
-	// Create a test file
+	// Create a test file (larger to demonstrate splitting)
 	testFile := "test_file.txt"
-	testContent := "This is a test file for the complete NZB posting workflow.\n" +
-		"It contains enough content to be split into multiple parts.\n" +
-		"We will test yEnc encoding, file splitting, PAR2 generation, SFV creation,\n" +
-		"and NZB generation with all components included.\n" +
-		"This ensures the complete workflow functions correctly.\n"
+	testContent := ""
+	// Create content that will definitely be split into multiple parts
+	for i := 0; i < 100; i++ {
+		testContent += fmt.Sprintf("This is line %d of the test file for the complete NZB posting workflow.\n", i)
+		testContent += "It contains enough content to be split into multiple parts for demonstration.\n"
+		testContent += "We will test yEnc encoding, file splitting, PAR2 generation, SFV creation,\n"
+		testContent += "and NZB generation with all components included to ensure proper workflow.\n"
+	}
 
 	err := os.WriteFile(testFile, []byte(testContent), 0644)
 	if err != nil {
@@ -38,7 +41,7 @@ func testCompleteWorkflow() {
 	defer os.RemoveAll(outputDir)
 
 	// Initialize components
-	split := splitter.NewSplitter(1024) // Small parts for testing
+	split := splitter.NewSplitter(2048) // Small parts for testing (2KB each)
 	yencEnc := yenc.Encoder{}
 	testPoster := "test@example.com"
 	nzbGen := nzb.NewGenerator(outputDir, testPoster)
