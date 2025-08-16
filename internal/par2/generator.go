@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/schollz/progressbar/v3"
 )
@@ -103,6 +104,9 @@ func (g *Generator) generateRecoveryData(filePath string, sliceSize int, redunda
 		progressbar.OptionShowCount(),
 		progressbar.OptionSetWidth(15),
 		progressbar.OptionSetRenderBlankState(true),
+		progressbar.OptionSetPredictTime(false),
+		progressbar.OptionClearOnFinish(),
+		progressbar.OptionThrottle(100*time.Millisecond),
 	)
 
 	// Read file in slices
@@ -135,6 +139,9 @@ func (g *Generator) generateRecoveryData(filePath string, sliceSize int, redunda
 		progressbar.OptionShowCount(),
 		progressbar.OptionSetWidth(15),
 		progressbar.OptionSetRenderBlankState(true),
+		progressbar.OptionSetPredictTime(false),
+		progressbar.OptionClearOnFinish(),
+		progressbar.OptionThrottle(100*time.Millisecond),
 	)
 
 	recoveryData := make([]byte, recoverySize*sliceSize)
@@ -239,6 +246,9 @@ func (g *Generator) createVOLFiles(originalFile string, sliceSize int, numSlices
 		progressbar.OptionShowCount(),
 		progressbar.OptionSetWidth(15),
 		progressbar.OptionSetRenderBlankState(true),
+		progressbar.OptionSetPredictTime(false),
+		progressbar.OptionClearOnFinish(),
+		progressbar.OptionThrottle(100*time.Millisecond),
 	)
 	
 	for i := 1; i <= volCount; i++ {
