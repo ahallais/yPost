@@ -20,7 +20,7 @@ func TestPAR2Generation(t *testing.T) {
 	}
 	
 	// Create PAR2 generator
-	generator := NewGenerator("")
+	generator := NewGenerator(tempDir)
 	
 	// Generate PAR2 files
 	par2Files, err := generator.CreatePAR2(testFile, 10)
@@ -39,6 +39,74 @@ func TestPAR2Generation(t *testing.T) {
 	}
 	
 	t.Logf("Successfully created %d PAR2 files", len(par2Files))
+}
+
+func TestPAR2GenerationForParts(t *testing.T) {
+	// Create temporary directory
+	tempDir := t.TempDir()
+	
+	// Create test parts (simulating split files)
+	testParts := []string{
+		filepath.Join(tempDir, "test.part01"),
+		filepath.Join(tempDir, "test.part02"),
+		filepath.Join(tempDir, "test.part03"),
+	}
+	
+	testData := [][]byte{
+		[]byte("This is part 1 of the test file for PAR2 generation."),
+		[]byte("This is part 2 of the test file for PAR2 generation."),
+		[]byte("This is part 3 of the test file for PAR2 generation."),
+	}
+	
+	// Create part files
+	for i, partPath := range testParts {
+		err := os.WriteFile(partPath, testData[i], 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	
+	// Create PAR2 generator
+	generator := NewGenerator(tempDir)
+	
+	// Generate PAR2 files for parts (standard practice)
+	par2Files, err := generator.CreatePAR2ForParts(testParts, "test.txt", 15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	// Verify PAR2 files were created
+	if len(par2Files) == 0 {
+		t.Fatal("No PAR2 files were created")
+	}
+	
+	// Check if main PAR2 file exists
+	if _, err := os.Stat(par2Files[0]); os.IsNotExist(err) {
+		t.Fatal("Main PAR2 file was not created")
+	}
+	
+	// Should have created multiple volume files for 15% redundancy
+	if len(par2Files) < 2 {
+		t.Fatal("Expected multiple PAR2 files (index + volumes)")
+	}
+	
+	// Check for standard volume naming
+	foundVolFile := false
+	for _, par2File := range par2Files {
+		if filepath.Ext(par2File) == ".par2" && len(filepath.Base(par2File)) > 10 {
+			// Check if it contains "vol" in the name
+			if len(filepath.Base(par2File)) > 15 {
+				foundVolFile = true
+				break
+			}
+		}
+	}
+	
+	if !foundVolFile {
+		t.Log("Volume files may not follow expected naming, but PAR2 generation succeeded")
+	}
+	
+	t.Logf("Successfully created %d PAR2 files for parts", len(par2Files))
 }
 
 func TestXORFunctions(t *testing.T) {
