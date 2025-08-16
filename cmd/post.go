@@ -53,7 +53,7 @@ func init() {
 	postCmd.Flags().StringVar(&posterName, "poster-name", "", "name of the poster")
 	postCmd.Flags().StringVar(&posterEmail, "poster-email", "", "email address of the poster")
 	postCmd.Flags().StringVarP(&subject, "subject", "s", "", "subject template")
-	postCmd.Flags().Int64Var(&maxPartSize, "max-part-size", 750*1024, "maximum size per part in bytes")
+	postCmd.Flags().Int64Var(&maxPartSize, "max-part-size", 0, "maximum size per part in bytes")
 	postCmd.Flags().IntVar(&maxLineLen, "max-line-length", 128, "maximum line length")
 	postCmd.Flags().BoolVar(&createPAR2, "par2", true, "create PAR2 recovery files")
 	postCmd.Flags().BoolVar(&createSFV, "sfv", true, "create SFV checksum file")
