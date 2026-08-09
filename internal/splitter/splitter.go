@@ -1,0 +1,198 @@
+package splitter
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+
+	"ypost/pkg/models"
+)
+
+// Splitter handles file splitting operations
+type Splitter struct {
+	maxPartSize int64
+}
+
+// NewSplitter creates a new file splitter
+func NewSplitter(maxPartSize int64) *Splitter {
+	return &Splitter{
+		maxPartSize: maxPartSize,
+	}
+}
+
+// SplitFile splits a file into parts based on configuration and saves them to output directory
+func (s *Splitter) SplitFile(filePath string, outputDir string) ([]*models.FilePart, error) {
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	// Ensure output directory exists
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	var parts []*models.FilePart
+	partNumber := 1
+	bytesRead := int64(0)
+	totalParts := int((fileInfo.Size() + s.maxPartSize - 1) / s.maxPartSize)
+
+	for bytesRead < fileInfo.Size() {
+		partSize := s.maxPartSize
+		if fileInfo.Size()-bytesRead < partSize {
+			partSize = fileInfo.Size() - bytesRead
+		}
+
+		data := make([]byte, partSize)
+		n, err := file.Read(data)
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("failed to read file: %w", err)
+		}
+
+		if n > 0 {
+			data = data[:n]
+			checksum := s.calculateChecksum(data)
+
+			// Generate filename for this part
+			partFileName := s.GetPartFileName(filepath.Base(filePath), partNumber, totalParts)
+			partFilePath := filepath.Join(outputDir, partFileName)
+
+			// Write part to file
+			if err := os.WriteFile(partFilePath, data, 0644); err != nil {
+				return nil, fmt.Errorf("failed to write part file: %w", err)
+			}
+
+			part := &models.FilePart{
+				PartNumber: partNumber,
+				FileName:   partFileName,
+				Size:       int64(n),
+				FilePath:   partFilePath,
+				Data:       nil, // No longer storing data in memory
+				Checksum:   checksum,
+			}
+
+			parts = append(parts, part)
+			partNumber++
+			bytesRead += int64(n)
+		}
+
+		if err == io.EOF {
+			break
+		}
+	}
+
+	return parts, nil
+}
+
+// SplitIntoChunks splits data into chunks of specified size
+func (s *Splitter) SplitIntoChunks(data []byte, chunkSize int64) [][]byte {
+	var chunks [][]byte
+
+	for i := int64(0); i < int64(len(data)); i += chunkSize {
+		end := i + chunkSize
+		if end > int64(len(data)) {
+			end = int64(len(data))
+		}
+		chunks = append(chunks, data[i:end])
+	}
+
+	return chunks
+}
+
+// calculateChecksum calculates SHA256 checksum for data integrity
+func (s *Splitter) calculateChecksum(data []byte) string {
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])
+}
+
+// GetPartFileName generates a filename for a file part
+func (s *Splitter) GetPartFileName(originalName string, partNumber int, totalParts int) string {
+	if totalParts > 1 {
+		width := len(fmt.Sprintf("%d", totalParts))
+		if width < 3 {
+			width = 3
+		}
+		return fmt.Sprintf("%s.%0*d", originalName, width, partNumber)
+	}
+
+	return originalName
+}
+
+// JoinParts joins file parts back into a single file
+func (s *Splitter) JoinParts(parts []*models.FilePart, outputPath string) error {
+	outputFile, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer outputFile.Close()
+
+	for _, part := range parts {
+		// Read data from file
+		data, err := os.ReadFile(part.FilePath)
+		if err != nil {
+			return fmt.Errorf("failed to read part file %s: %w", part.FilePath, err)
+		}
+
+		// Verify checksum
+		calculatedChecksum := s.calculateChecksum(data)
+		if calculatedChecksum != part.Checksum {
+			return fmt.Errorf("checksum mismatch for part %d", part.PartNumber)
+		}
+
+		_, err = outputFile.Write(data)
+		if err != nil {
+			return fmt.Errorf("failed to write part %d: %w", part.PartNumber, err)
+		}
+	}
+
+	return nil
+}
+
+// GetPartInfo returns information about file parts without splitting
+func (s *Splitter) GetPartInfo(filePath string) (int64, int, error) {
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	fileSize := fileInfo.Size()
+	totalParts := int((fileSize + s.maxPartSize - 1) / s.maxPartSize)
+
+	return fileSize, totalParts, nil
+}
+
+// ValidateParts validates that all parts exist and have correct checksums
+func (s *Splitter) ValidateParts(parts []*models.FilePart) error {
+	for _, part := range parts {
+		// Read data from file
+		data, err := os.ReadFile(part.FilePath)
+		if err != nil {
+			return fmt.Errorf("failed to read part file %s: %w", part.FilePath, err)
+		}
+
+		calculatedChecksum := s.calculateChecksum(data)
+		if calculatedChecksum != part.Checksum {
+			return fmt.Errorf("checksum validation failed for part %d", part.PartNumber)
+		}
+	}
+	return nil
+}
+
+// CleanupPartFiles removes temporary part files
+func (s *Splitter) CleanupPartFiles(parts []*models.FilePart) error {
+	for _, part := range parts {
+		if err := os.Remove(part.FilePath); err != nil {
+			return fmt.Errorf("failed to remove part file %s: %w", part.FilePath, err)
+		}
+	}
+	return nil
+}
