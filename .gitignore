@@ -9,6 +9,7 @@
 *.test
 *.out
 *.par2
+release.sh
 
 # Go build output
 Nyuu/
