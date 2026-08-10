@@ -50,3 +50,19 @@ func TestEncodedLinesDoNotEndWithEscapeMarker(t *testing.T) {
 		t.Fatalf("round trip failed: %v", err)
 	}
 }
+
+func TestEncodePartToMatchesEncodePart(t *testing.T) {
+	data := make([]byte, 4096)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	encoder := NewEncoder(128)
+	want := encoder.EncodePart(data, "stream.bin", 3, 9, 12345, 4097)
+	var streamed bytes.Buffer
+	if err := encoder.EncodePartTo(&streamed, data, "stream.bin", 3, 9, 12345, 4097); err != nil {
+		t.Fatal(err)
+	}
+	if streamed.String() != want {
+		t.Fatal("streaming encoder output differs from buffered encoder")
+	}
+}

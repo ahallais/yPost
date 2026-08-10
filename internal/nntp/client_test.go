@@ -196,6 +196,10 @@ func TestPostArticleContextReconnectsOnceWithSameMessageID(t *testing.T) {
 		connected: true,
 	}
 	var reconnects int
+	var retryEvents []RetryEvent
+	c.SetRetryHook(func(event RetryEvent) {
+		retryEvents = append(retryEvents, event)
+	})
 	c.reconnect = func() error {
 		reconnects++
 		c.mu.Lock()
@@ -232,6 +236,9 @@ func TestPostArticleContextReconnectsOnceWithSameMessageID(t *testing.T) {
 	}
 	if reconnects != 1 {
 		t.Fatalf("reconnects = %d, want 1", reconnects)
+	}
+	if len(retryEvents) != 1 || retryEvents[0].Kind != "connection failure" || retryEvents[0].Attempt != 1 {
+		t.Fatalf("retry events = %#v", retryEvents)
 	}
 	if first.messageID != messageID || second.messageID != messageID {
 		t.Fatalf("message IDs differ: first=%q second=%q returned=%q", first.messageID, second.messageID, messageID)
@@ -354,5 +361,49 @@ func TestWriteArticleBodyUsesLargeBufferedWrites(t *testing.T) {
 	}
 	if underlying.writes > 4 {
 		t.Fatalf("underlying writes = %d, want at most 4 large writes", underlying.writes)
+	}
+}
+
+func TestArticleWireWriterHandlesSplitCRLFAndDotStuffing(t *testing.T) {
+	var output bytes.Buffer
+	writer := newArticleWireWriter(bufio.NewWriter(&output), nil)
+	if _, err := writer.Write([]byte("first\r")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("\n.second\r")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if want := "first\r\n..second\r\n.\r\n"; output.String() != want {
+		t.Fatalf("wire body = %q, want %q", output.String(), want)
+	}
+}
+
+func TestPostArticleContextUsesServerReturnedMessageID(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	c := &Client{
+		conn:      clientConn,
+		reader:    textproto.NewReader(bufio.NewReader(clientConn)),
+		writer:    textproto.NewWriter(bufio.NewWriter(clientConn)),
+		connected: true,
+	}
+	result := make(chan servedArticle, 1)
+	go func() {
+		result <- serveArticle(serverConn, "240 <server-assigned@test> article received\r\n")
+	}()
+
+	messageID, err := c.PostArticleContext(context.Background(), "alt.test", "subject", "poster", "body\r\n", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if served := <-result; served.err != nil {
+		t.Fatal(served.err)
+	}
+	if messageID != "<server-assigned@test>" {
+		t.Fatalf("returned Message-ID = %q", messageID)
 	}
 }

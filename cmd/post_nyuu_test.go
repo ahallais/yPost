@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"ypost/internal/logger"
+	"ypost/internal/nntp"
 	"ypost/internal/nzb"
 )
 
@@ -55,9 +57,12 @@ type recordingPoster struct {
 	state *recordingPostState
 }
 
-func (p *recordingPoster) PostArticleContext(ctx context.Context, _, subject, _, _ string, _ map[string]string) (string, error) {
+func (p *recordingPoster) PostArticleStreamContext(ctx context.Context, _, subject, _ string, body nntp.BodyWriter, _ map[string]string) (string, error) {
 	part, err := strconv.Atoi(subject)
 	if err != nil {
+		return "", err
+	}
+	if err := body(io.Discard); err != nil {
 		return "", err
 	}
 	p.state.mu.Lock()
@@ -130,7 +135,14 @@ func TestPostNyuuFileStreamsConcurrentlyAndWritesOrderedNZB(t *testing.T) {
 	if state.maxActive < 2 {
 		t.Fatalf("maximum concurrent posts = %d, want at least 2", state.maxActive)
 	}
-	if len(state.completionOrder) == 0 || state.completionOrder[0] == 1 {
+	outOfOrder := false
+	for index, part := range state.completionOrder {
+		if part != index+1 {
+			outOfOrder = true
+			break
+		}
+	}
+	if !outOfOrder {
 		t.Fatalf("completion order = %v, test did not exercise out-of-order results", state.completionOrder)
 	}
 	for id, maximum := range state.maxByPoster {
@@ -168,7 +180,7 @@ type cancellingPoster struct {
 	state *cancellingPostState
 }
 
-func (p *cancellingPoster) PostArticleContext(ctx context.Context, _, subject, _, _ string, _ map[string]string) (string, error) {
+func (p *cancellingPoster) PostArticleStreamContext(ctx context.Context, _, subject, _ string, _ nntp.BodyWriter, _ map[string]string) (string, error) {
 	part, err := strconv.Atoi(subject)
 	if err != nil {
 		return "", err
@@ -208,7 +220,7 @@ func TestPostNyuuFileCancelsWorkersAfterFirstFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer nzbGen.Close()
+	defer nzbGen.Abort()
 	log, err := logger.New(filepath.Join(dir, "logs"))
 	if err != nil {
 		t.Fatal(err)

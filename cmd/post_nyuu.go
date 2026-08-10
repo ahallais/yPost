@@ -163,7 +163,7 @@ func runPostNyuu(cmd *cobra.Command, args []string) error {
 	closed := false
 	defer func() {
 		if !closed {
-			_ = nzbGen.Close()
+			_ = nzbGen.Abort()
 		}
 	}()
 
@@ -190,6 +190,18 @@ func runPostNyuu(cmd *cobra.Command, args []string) error {
 	clients, err := pool.ConnectAll()
 	if err != nil {
 		return fmt.Errorf("connect NNTP workers: %w", err)
+	}
+	for index, client := range clients {
+		worker := index + 1
+		client.SetRetryHook(func(event nntp.RetryEvent) {
+			if event.Delay > 0 {
+				log.Warn("NNTP worker %d: %s; retry %d/%d in %s: %v",
+					worker, event.Kind, event.Attempt, event.Maximum, event.Delay, event.Err)
+				return
+			}
+			log.Warn("NNTP worker %d: %s; retry %d/%d: %v",
+				worker, event.Kind, event.Attempt, event.Maximum, event.Err)
+		})
 	}
 
 	// Small metadata first, then data, then recovery volumes. They remain one
@@ -293,7 +305,7 @@ func postingOrder(sfvPath string, par2Files, dataFiles []string) []string {
 }
 
 type articlePoster interface {
-	PostArticleContext(context.Context, string, string, string, string, map[string]string) (string, error)
+	PostArticleStreamContext(context.Context, string, string, string, nntp.BodyWriter, map[string]string) (string, error)
 }
 
 type articleTask struct {
@@ -393,10 +405,12 @@ func postNyuuFileWithPosters(posters []articlePoster, path string, cfg *models.C
 						cancel()
 						return
 					}
-					body := encoder.EncodePart(chunk, name, task.part, totalParts, fileSize, task.offset+1)
 					subj := renderSubject(cfg.Posting.SubjectTemplate, name, task.part, totalParts, fileSize)
-					messageID, err := poster.PostArticleContext(ctx, cfg.Posting.Group, subj,
-						fmt.Sprintf("%s <%s>", cfg.Posting.PosterName, cfg.Posting.PosterEmail), body, cfg.Posting.CustomHeaders)
+					writeBody := func(writer io.Writer) error {
+						return encoder.EncodePartTo(writer, chunk, name, task.part, totalParts, fileSize, task.offset+1)
+					}
+					messageID, err := poster.PostArticleStreamContext(ctx, cfg.Posting.Group, subj,
+						fmt.Sprintf("%s <%s>", cfg.Posting.PosterName, cfg.Posting.PosterEmail), writeBody, cfg.Posting.CustomHeaders)
 					if err != nil {
 						results <- articleResult{part: task.part, err: err}
 						cancel()

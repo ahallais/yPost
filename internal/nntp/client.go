@@ -31,13 +31,32 @@ type Client struct {
 	mu        sync.Mutex
 	postMu    sync.Mutex
 	reconnect func() error
+	retryHook func(RetryEvent)
 }
+
+// RetryEvent describes a bounded retry before it happens.
+type RetryEvent struct {
+	Kind    string
+	Attempt int
+	Maximum int
+	Delay   time.Duration
+	Err     error
+}
+
+// BodyWriter writes a complete article body and must be safe to call again
+// when the request is retried.
+type BodyWriter func(io.Writer) error
 
 // NewClient creates a new NNTP client
 func NewClient(config *models.ServerConfig) *Client {
 	return &Client{
 		config: config,
 	}
+}
+
+// SetRetryHook installs an optional observer used for retry diagnostics.
+func (c *Client) SetRetryHook(hook func(RetryEvent)) {
+	c.retryHook = hook
 }
 
 // Connect establishes connection to the NNTP server
@@ -127,9 +146,18 @@ func (c *Client) PostArticle(group string, subject string, from string, body str
 }
 
 // PostArticleContext posts an article and interrupts socket I/O when ctx is
-// cancelled. A transport failure is retried once on a fresh connection using
-// the same Message-ID; explicit NNTP rejection responses are not retried.
+// cancelled. Transport failures and code 441 responses use their separately
+// configured retry limits while preserving the same Message-ID.
 func (c *Client) PostArticleContext(ctx context.Context, group string, subject string, from string, body string, headers map[string]string) (messageID string, err error) {
+	return c.PostArticleStreamContext(ctx, group, subject, from, func(writer io.Writer) error {
+		_, err := io.WriteString(writer, body)
+		return err
+	}, headers)
+}
+
+// PostArticleStreamContext posts a replayable streaming body. It retains only
+// the caller's raw article buffer and the bounded network buffer.
+func (c *Client) PostArticleStreamContext(ctx context.Context, group string, subject string, from string, writeBody BodyWriter, headers map[string]string) (messageID string, err error) {
 	c.postMu.Lock()
 	defer c.postMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -140,8 +168,12 @@ func (c *Client) PostArticleContext(ctx context.Context, group string, subject s
 	transportRetries := 0
 	postRetries := 0
 	for {
-		err = c.postArticleOnce(ctx, group, subject, from, body, headers, messageID)
+		responseID, postErr := c.postArticleOnce(ctx, group, subject, from, writeBody, headers, messageID)
+		err = postErr
 		if err == nil {
+			if responseID != "" {
+				messageID = responseID
+			}
 			return messageID, nil
 		}
 		if ctx.Err() != nil {
@@ -149,6 +181,7 @@ func (c *Client) PostArticleContext(ctx context.Context, group string, subject s
 		}
 		if isPostRejection(err) && postRetries < c.postRetryLimit() {
 			postRetries++
+			c.emitRetry(RetryEvent{Kind: "post rejection", Attempt: postRetries, Maximum: c.postRetryLimit(), Err: err})
 			continue
 		}
 		if !isTransportError(err) {
@@ -163,6 +196,7 @@ func (c *Client) PostArticleContext(ctx context.Context, group string, subject s
 
 		for {
 			transportRetries++
+			c.emitRetry(RetryEvent{Kind: "connection failure", Attempt: transportRetries, Maximum: c.requestRetryLimit(), Delay: c.reconnectDelay(), Err: err})
 			if err := waitForContext(ctx, c.reconnectDelay()); err != nil {
 				return "", err
 			}
@@ -170,6 +204,7 @@ func (c *Client) PostArticleContext(ctx context.Context, group string, subject s
 			if reconnectErr == nil {
 				break
 			}
+			err = reconnectErr
 			if transportRetries >= c.requestRetryLimit() {
 				return "", fmt.Errorf("reconnect after posting failure: %w", reconnectErr)
 			}
@@ -177,13 +212,13 @@ func (c *Client) PostArticleContext(ctx context.Context, group string, subject s
 	}
 }
 
-func (c *Client) postArticleOnce(ctx context.Context, group string, subject string, from string, body string, headers map[string]string, messageID string) (err error) {
+func (c *Client) postArticleOnce(ctx context.Context, group string, subject string, from string, writeBody BodyWriter, headers map[string]string, messageID string) (responseMessageID string, err error) {
 	c.mu.Lock()
 	connected := c.connected
 	conn := c.conn
 	c.mu.Unlock()
 	if !connected {
-		return fmt.Errorf("not connected to server")
+		return "", fmt.Errorf("not connected to server")
 	}
 	if c.config != nil && c.config.CommandTimeout > 0 {
 		_ = conn.SetDeadline(time.Now().Add(c.config.CommandTimeout))
@@ -219,12 +254,12 @@ func (c *Client) postArticleOnce(ctx context.Context, group string, subject stri
 	// Send POST command
 	err = c.writer.PrintfLine("POST")
 	if err != nil {
-		return fmt.Errorf("failed to send POST command: %w", err)
+		return "", fmt.Errorf("failed to send POST command: %w", err)
 	}
 
 	_, _, err = c.reader.ReadCodeLine(340)
 	if err != nil {
-		return fmt.Errorf("server rejected POST command: %w", err)
+		return "", fmt.Errorf("server rejected POST command: %w", err)
 	}
 
 	// Write headers
@@ -246,14 +281,14 @@ func (c *Client) postArticleOnce(ctx context.Context, group string, subject stri
 	for key, value := range headersToSend {
 		err := c.writer.PrintfLine("%s: %s", key, value)
 		if err != nil {
-			return fmt.Errorf("failed to send header %s: %w", key, err)
+			return "", fmt.Errorf("failed to send header %s: %w", key, err)
 		}
 	}
 
 	// Send empty line to separate headers from body
 	err = c.writer.PrintfLine("")
 	if err != nil {
-		return fmt.Errorf("failed to send header separator: %w", err)
+		return "", fmt.Errorf("failed to send header separator: %w", err)
 	}
 
 	// Send the body through a large buffered writer. PrintfLine flushes after
@@ -263,22 +298,27 @@ func (c *Client) postArticleOnce(ctx context.Context, group string, subject stri
 			_ = conn.SetWriteDeadline(time.Now().Add(c.config.CommandTimeout))
 		}
 	}
-	if err = writeArticleBody(c.writer.W, body, prepareFlush); err != nil {
-		return fmt.Errorf("failed to send article body: %w", err)
+	wireWriter := newArticleWireWriter(c.writer.W, prepareFlush)
+	if err = writeBody(wireWriter); err != nil {
+		return "", fmt.Errorf("failed to stream article body: %w", err)
+	}
+	if err = wireWriter.Close(); err != nil {
+		return "", fmt.Errorf("failed to send article body: %w", err)
 	}
 
 	if c.config != nil && c.config.PostTimeout > 0 {
 		_ = conn.SetReadDeadline(time.Now().Add(c.config.PostTimeout))
 	}
-	_, _, err = c.reader.ReadCodeLine(240)
+	_, response, responseErr := c.reader.ReadCodeLine(240)
+	err = responseErr
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return "", ctx.Err()
 		}
-		return fmt.Errorf("server rejected article: %w", err)
+		return "", fmt.Errorf("server rejected article: %w", err)
 	}
 
-	return nil
+	return responseMessageIDFromText(response), nil
 }
 
 func (c *Client) generateMessageID() string {
@@ -300,6 +340,28 @@ func isTransportError(err error) bool {
 func isPostRejection(err error) bool {
 	var protocolError *textproto.Error
 	return errors.As(err, &protocolError) && protocolError.Code == 441
+}
+
+func responseMessageIDFromText(response string) string {
+	start := strings.IndexByte(response, '<')
+	if start < 0 {
+		return ""
+	}
+	end := strings.IndexByte(response[start+1:], '>')
+	if end < 1 {
+		return ""
+	}
+	value := response[start+1 : start+1+end]
+	if strings.ContainsAny(value, "<>\r\n\t ") {
+		return ""
+	}
+	return "<" + value + ">"
+}
+
+func (c *Client) emitRetry(event RetryEvent) {
+	if c.retryHook != nil {
+		c.retryHook(event)
+	}
 }
 
 func (c *Client) requestRetryLimit() int {
@@ -337,57 +399,108 @@ func waitForContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func writeArticleBody(writer *bufio.Writer, body string, prepareFlush func()) error {
-	flushChunk := func(force bool) error {
-		if !force && writer.Buffered() < uploadWriteChunkSize {
-			return nil
-		}
-		if prepareFlush != nil {
-			prepareFlush()
-		}
-		return writer.Flush()
+type articleWireWriter struct {
+	writer       *bufio.Writer
+	prepareFlush func()
+	atLineStart  bool
+	pendingCR    bool
+	wrote        bool
+	closed       bool
+}
+
+func newArticleWireWriter(writer *bufio.Writer, prepareFlush func()) *articleWireWriter {
+	return &articleWireWriter{writer: writer, prepareFlush: prepareFlush, atLineStart: true}
+}
+
+func (w *articleWireWriter) Write(data []byte) (int, error) {
+	if w.closed {
+		return 0, fmt.Errorf("article body writer is closed")
 	}
-	atLineStart := true
-	for i := 0; i < len(body); i++ {
-		value := body[i]
-		if atLineStart && value == '.' {
-			if err := writer.WriteByte('.'); err != nil {
-				return err
+	consumed := 0
+	for consumed < len(data) {
+		value := data[consumed]
+		if w.pendingCR {
+			if _, err := w.writer.WriteString("\r\n"); err != nil {
+				return consumed, err
+			}
+			w.pendingCR = false
+			w.atLineStart = true
+			if value == '\n' {
+				w.wrote = true
+				consumed++
+				if err := w.flush(false); err != nil {
+					return consumed, err
+				}
+				continue
+			}
+		}
+		if w.atLineStart && value == '.' {
+			if err := w.writer.WriteByte('.'); err != nil {
+				return consumed, err
 			}
 		}
 		switch value {
 		case '\r':
-			if i+1 < len(body) && body[i+1] == '\n' {
-				i++
-			}
-			if _, err := writer.WriteString("\r\n"); err != nil {
-				return err
-			}
-			atLineStart = true
+			w.pendingCR = true
 		case '\n':
-			if _, err := writer.WriteString("\r\n"); err != nil {
-				return err
+			if _, err := w.writer.WriteString("\r\n"); err != nil {
+				return consumed, err
 			}
-			atLineStart = true
+			w.atLineStart = true
 		default:
-			if err := writer.WriteByte(value); err != nil {
-				return err
+			if err := w.writer.WriteByte(value); err != nil {
+				return consumed, err
 			}
-			atLineStart = false
+			w.atLineStart = false
 		}
-		if err := flushChunk(false); err != nil {
+		w.wrote = true
+		consumed++
+		if err := w.flush(false); err != nil {
+			return consumed, err
+		}
+	}
+	return consumed, nil
+}
+
+func (w *articleWireWriter) Close() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	if w.pendingCR {
+		if _, err := w.writer.WriteString("\r\n"); err != nil {
+			return err
+		}
+		w.pendingCR = false
+		w.atLineStart = true
+	}
+	if !w.wrote || !w.atLineStart {
+		if _, err := w.writer.WriteString("\r\n"); err != nil {
 			return err
 		}
 	}
-	if len(body) == 0 || !atLineStart {
-		if _, err := writer.WriteString("\r\n"); err != nil {
-			return err
-		}
-	}
-	if _, err := writer.WriteString(".\r\n"); err != nil {
+	if _, err := w.writer.WriteString(".\r\n"); err != nil {
 		return err
 	}
-	return flushChunk(true)
+	return w.flush(true)
+}
+
+func (w *articleWireWriter) flush(force bool) error {
+	if !force && w.writer.Buffered() < uploadWriteChunkSize {
+		return nil
+	}
+	if w.prepareFlush != nil {
+		w.prepareFlush()
+	}
+	return w.writer.Flush()
+}
+
+func writeArticleBody(writer *bufio.Writer, body string, prepareFlush func()) error {
+	wireWriter := newArticleWireWriter(writer, prepareFlush)
+	if _, err := io.WriteString(wireWriter, body); err != nil {
+		return err
+	}
+	return wireWriter.Close()
 }
 
 func (c *Client) reconnectForPost() error {

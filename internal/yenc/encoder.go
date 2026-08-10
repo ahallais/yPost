@@ -1,6 +1,7 @@
 package yenc
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"hash/crc32"
@@ -46,38 +47,67 @@ func (e *Encoder) Encode(data []byte, filename string, partNum int, totalParts i
 // EncodePart encodes one article of a multipart yEnc file. fileSize is the
 // size of the complete file and begin is the one-based byte offset of data.
 func (e *Encoder) EncodePart(data []byte, filename string, partNum int, totalParts int, fileSize int64, begin int64) string {
+	var buf bytes.Buffer
+	_ = e.EncodePartTo(&buf, data, filename, partNum, totalParts, fileSize, begin)
+	return buf.String()
+}
+
+// EncodePartTo streams one yEnc article to w without allocating an encoded
+// copy of the complete article. The raw input remains owned by the caller and
+// can be replayed when an NNTP retry is required.
+func (e *Encoder) EncodePartTo(w io.Writer, data []byte, filename string, partNum int, totalParts int, fileSize int64, begin int64) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	var buf bytes.Buffer
+	writer := bufio.NewWriterSize(w, 32*1024)
 
-	// Calculate CRC32
 	e.crc32 = crc32.ChecksumIEEE(data)
 	e.size = int64(len(data))
 
-	// Write header
 	header := e.buildHeader(filename, partNum, totalParts, fileSize)
-	buf.WriteString(header)
-	buf.WriteString("\r\n")
+	if _, err := fmt.Fprintf(writer, "%s\r\n", header); err != nil {
+		return err
+	}
 	if totalParts > 1 {
-		fmt.Fprintf(&buf, "=ypart begin=%d end=%d\r\n", begin, begin+int64(len(data))-1)
+		if _, err := fmt.Fprintf(writer, "=ypart begin=%d end=%d\r\n", begin, begin+int64(len(data))-1); err != nil {
+			return err
+		}
 	}
 
-	// Encode data
-	encoded := e.encodeData(data)
-
-	// Split into lines
-	lines := e.splitIntoLines(encoded)
-	for _, line := range lines {
-		buf.WriteString(line)
-		buf.WriteString("\r\n")
+	linePosition := 0
+	for _, value := range data {
+		encoded := value + 42
+		encodedLength := 1
+		if encoded == 0 || encoded == 9 || encoded == 10 || encoded == 13 || encoded == '=' {
+			encodedLength = 2
+		}
+		if linePosition+encodedLength > e.effectiveLineLength() {
+			if _, err := writer.WriteString("\r\n"); err != nil {
+				return err
+			}
+			linePosition = 0
+		}
+		if encodedLength == 2 {
+			if err := writer.WriteByte('='); err != nil {
+				return err
+			}
+			encoded += 64
+		}
+		if err := writer.WriteByte(encoded); err != nil {
+			return err
+		}
+		linePosition += encodedLength
+	}
+	if linePosition > 0 {
+		if _, err := writer.WriteString("\r\n"); err != nil {
+			return err
+		}
 	}
 
-	// Write trailer
 	trailer := e.buildTrailer(partNum, totalParts > 1)
-	buf.WriteString(trailer)
-	buf.WriteString("\r\n")
-
-	return buf.String()
+	if _, err := fmt.Fprintf(writer, "%s\r\n", trailer); err != nil {
+		return err
+	}
+	return writer.Flush()
 }
 
 // buildHeader creates the yEnc header matching Node.js format

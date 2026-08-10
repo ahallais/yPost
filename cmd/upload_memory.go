@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	yencWorkerMemoryMultiplier = int64(8)
+	yencWorkerMemoryMultiplier = int64(3)
 	workerFixedMemoryEstimate  = int64(2 * 1024 * 1024)
 )
 
@@ -42,9 +42,9 @@ func parseAvailableMemory(meminfo string) (int64, error) {
 }
 
 // memoryAwareConnectionLimit reserves half of currently available memory for
-// the OS and other phases. The worker estimate covers the raw article buffer,
-// worst-case yEnc expansion, encoder temporaries, the post body, and TLS/buffer
-// overhead. At least one worker is always retained.
+// the OS and other phases. Streaming yEnc avoids a complete encoded article;
+// the worker estimate covers the raw chunk, encoder/network buffers, TLS and
+// conservative runtime overhead. At least one worker is always retained.
 func memoryAwareConnectionLimit(requested int, articleSize, memoryAvailable int64) (connections int, estimatedPerWorker int64) {
 	if requested < 1 {
 		requested = 1

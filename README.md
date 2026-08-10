@@ -26,8 +26,11 @@ small PAR2 index and SFV, data splits, then PAR2 recovery volumes.
 Go 1.22 or later is required.
 
 ```bash
-go build -o ypost .
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ypost .
 ```
+
+This produces a stripped, statically linked executable with no Node.js, libc,
+or other runtime dependency.
 
 ## Configuration
 
@@ -90,12 +93,19 @@ For a server entry, `max_connections` controls the number of concurrent NNTP
 article workers; legacy single-server configurations use `nntp.connections`.
 Each worker owns one connection and buffers at most one
 `posting.max_article_size` chunk, keeping upload memory bounded independently
-of the physical split-file size. If a connection is reset or reaches EOF while
-posting, that worker reconnects and retries the article up to `request_retries`
-times with the same Message-ID. Code `441` responses use the independent
-`post_retries` limit. On Linux, yPost reads `MemAvailable` before connecting and
-reduces the requested connection count when the estimated yEnc worker memory
-would consume more than half of available memory.
+of the physical split-file size. yEnc output streams directly into the bounded
+network buffer instead of constructing a complete encoded article. If a
+connection is reset or reaches EOF while posting, that worker reconnects and
+retries the article up to `request_retries` times with the same Message-ID.
+Code `441` responses use the independent `post_retries` limit. Retry attempts
+are logged, and a Message-ID returned by the server replaces the submitted ID
+in the NZB. On Linux, yPost reads `MemAvailable` before connecting and reduces
+the requested connection count when the estimated yEnc worker memory would
+consume more than half of available memory.
+
+NZBs are written to a temporary file in the destination directory and
+atomically renamed into place only after every article succeeds. Temporary NZB
+output is removed when posting fails.
 
 The subject template supports `Filename`, `Index`, `Total`, `ChunkIndex`,
 `TotalChunks`, and `Size`, using Go template syntax as shown above.
