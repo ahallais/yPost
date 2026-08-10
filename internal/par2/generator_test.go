@@ -69,6 +69,15 @@ func TestPAR2GenerationForParts(t *testing.T) {
 
 	// Create PAR2 generator
 	generator := NewGenerator(tempDir)
+	completedPhases := make(map[string]bool)
+	generator.SetProgressCallback(func(phase string, completed, total int64) {
+		if total <= 0 || completed < 0 || completed > total {
+			t.Fatalf("invalid %s progress: %d/%d", phase, completed, total)
+		}
+		if completed == total {
+			completedPhases[phase] = true
+		}
+	})
 
 	// Generate PAR2 files for parts (standard practice)
 	par2Files, err := generator.CreatePAR2ForParts(testParts, "test.txt", 15)
@@ -89,6 +98,9 @@ func TestPAR2GenerationForParts(t *testing.T) {
 	// Should have created multiple volume files for 15% redundancy
 	if len(par2Files) < 2 {
 		t.Fatal("Expected multiple PAR2 files (index + volumes)")
+	}
+	if !completedPhases["PAR2 encoding"] || !completedPhases["PAR2 volumes"] {
+		t.Fatalf("incomplete progress phases: %v", completedPhases)
 	}
 
 	// Check for standard volume naming

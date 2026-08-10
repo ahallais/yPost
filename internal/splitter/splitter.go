@@ -25,6 +25,11 @@ func NewSplitter(maxPartSize int64) *Splitter {
 
 // SplitFile splits a file into parts based on configuration and saves them to output directory
 func (s *Splitter) SplitFile(filePath string, outputDir string) ([]*models.FilePart, error) {
+	return s.SplitFileWithProgress(filePath, outputDir, nil)
+}
+
+// SplitFileWithProgress is SplitFile with an optional byte progress callback.
+func (s *Splitter) SplitFileWithProgress(filePath string, outputDir string, onProgress func(int64)) ([]*models.FilePart, error) {
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to stat file: %w", err)
@@ -81,6 +86,9 @@ func (s *Splitter) SplitFile(filePath string, outputDir string) ([]*models.FileP
 			}
 
 			parts = append(parts, part)
+			if onProgress != nil {
+				onProgress(int64(n))
+			}
 			partNumber++
 			bytesRead += int64(n)
 		}

@@ -22,6 +22,18 @@ import "github.com/klauspost/reedsolomon"
 // Generator handles PAR2 recovery file generation
 type Generator struct {
 	par2Path string
+	progress func(phase string, completed, total int64)
+}
+
+// SetProgressCallback registers an optional callback for PAR2 phase progress.
+func (g *Generator) SetProgressCallback(callback func(phase string, completed, total int64)) {
+	g.progress = callback
+}
+
+func (g *Generator) reportProgress(phase string, completed, total int) {
+	if g.progress != nil {
+		g.progress(phase, int64(completed), int64(total))
+	}
 }
 
 const recoveryDataShardsPerBatch = 128
@@ -247,6 +259,8 @@ func (g *Generator) generateRecoveryDataBatched(paths []string, sliceSize int, r
 		progressbar.OptionClearOnFinish(),
 		progressbar.OptionThrottle(200*time.Millisecond),
 	)
+	progressTotal := totalDataShards + totalParityShards
+	g.reportProgress("PAR2 encoding", 0, progressTotal)
 
 	dataDone, parityDone := 0, 0
 	for dataDone < totalDataShards {
@@ -269,6 +283,7 @@ func (g *Generator) generateRecoveryDataBatched(paths []string, sliceSize int, r
 				return fail(fmt.Errorf("read data shard %d: %w", dataDone+i, err))
 			}
 			_ = bar.Add(1)
+			g.reportProgress("PAR2 encoding", dataDone+i+1+parityDone, progressTotal)
 		}
 		for i := dataInBatch; i < len(shards); i++ {
 			shards[i] = make([]byte, sliceSize)
@@ -276,11 +291,12 @@ func (g *Generator) generateRecoveryDataBatched(paths []string, sliceSize int, r
 		if err := enc.Encode(shards); err != nil {
 			return fail(fmt.Errorf("encode batch starting at shard %d: %w", dataDone, err))
 		}
-		for _, parity := range shards[dataInBatch:] {
+		for parityIndex, parity := range shards[dataInBatch:] {
 			if _, err := spoolFile.Write(parity); err != nil {
 				return fail(fmt.Errorf("write recovery spool: %w", err))
 			}
 			_ = bar.Add(1)
+			g.reportProgress("PAR2 encoding", dataDone+dataInBatch+parityDone+parityIndex+1, progressTotal)
 		}
 		dataDone += dataInBatch
 		parityDone += parityInBatch
@@ -868,6 +884,7 @@ func (g *Generator) createStandardVOLFilesFromSpool(baseName string, recovery *r
 		progressbar.OptionClearOnFinish(),
 		progressbar.OptionThrottle(100*time.Millisecond),
 	)
+	g.reportProgress("PAR2 volumes", 0, recovery.blocks)
 
 	var volFiles []string
 	blockIndex, volIndex := 0, 0
@@ -900,6 +917,7 @@ func (g *Generator) createStandardVOLFilesFromSpool(baseName string, recovery *r
 		blockIndex += blocksInVolume
 		volIndex++
 		_ = volBar.Add(blocksInVolume)
+		g.reportProgress("PAR2 volumes", blockIndex, recovery.blocks)
 	}
 	_ = volBar.Finish()
 	return volFiles, nil

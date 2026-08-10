@@ -24,6 +24,11 @@ func NewGenerator(outputDir string) *Generator {
 
 // CreateSFV creates an SFV file for the given file(s)
 func (g *Generator) CreateSFV(filePaths []string, sfvName string) (string, error) {
+	return g.CreateSFVWithProgress(filePaths, sfvName, nil)
+}
+
+// CreateSFVWithProgress is CreateSFV with an optional byte progress callback.
+func (g *Generator) CreateSFVWithProgress(filePaths []string, sfvName string, onProgress func(int64)) (string, error) {
 	if err := os.MkdirAll(g.outputDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create output directory: %w", err)
 	}
@@ -46,7 +51,7 @@ func (g *Generator) CreateSFV(filePaths []string, sfvName string) (string, error
 
 	// Calculate and write checksums for each file
 	for _, filePath := range filePaths {
-		checksum, err := g.calculateCRC32(filePath)
+		checksum, err := g.calculateCRC32WithProgress(filePath, onProgress)
 		if err != nil {
 			return "", fmt.Errorf("failed to calculate checksum for %s: %w", filePath, err)
 		}
@@ -68,6 +73,10 @@ func (g *Generator) CreateSFV(filePaths []string, sfvName string) (string, error
 
 // calculateCRC32 calculates the CRC32 checksum of a file
 func (g *Generator) calculateCRC32(filePath string) (uint32, error) {
+	return g.calculateCRC32WithProgress(filePath, nil)
+}
+
+func (g *Generator) calculateCRC32WithProgress(filePath string, onProgress func(int64)) (uint32, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open file: %w", err)
@@ -75,11 +84,22 @@ func (g *Generator) calculateCRC32(filePath string) (uint32, error) {
 	defer file.Close()
 
 	hash := crc32.NewIEEE()
-	if _, err := io.Copy(hash, file); err != nil {
+	reader := io.Reader(file)
+	if onProgress != nil {
+		reader = io.TeeReader(file, progressWriter(onProgress))
+	}
+	if _, err := io.Copy(hash, reader); err != nil {
 		return 0, fmt.Errorf("failed to calculate CRC32: %w", err)
 	}
 
 	return hash.Sum32(), nil
+}
+
+type progressWriter func(int64)
+
+func (w progressWriter) Write(p []byte) (int, error) {
+	w(int64(len(p)))
+	return len(p), nil
 }
 
 // VerifySFV verifies files against an SFV file
@@ -92,75 +112,75 @@ func (g *Generator) VerifySFV(sfvPath string) (bool, error) {
 
 	sfvDir := filepath.Dir(sfvPath)
 	scanner := bufio.NewScanner(file)
-	
+
 	allValid := true
-	
+
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		
+
 		// Skip empty lines and comments
 		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
 			continue
 		}
-		
+
 		// Parse SFV entry
 		parts := strings.Fields(line)
 		if len(parts) != 2 {
 			continue
 		}
-		
+
 		fileName := parts[0]
 		expectedChecksum := parts[1]
-		
+
 		// Calculate actual checksum
 		fullPath := filepath.Join(sfvDir, fileName)
 		actualChecksum, err := g.calculateCRC32(fullPath)
 		if err != nil {
 			return false, fmt.Errorf("failed to verify %s: %w", fileName, err)
 		}
-		
+
 		// Compare checksums
 		actualHex := fmt.Sprintf("%08X", actualChecksum)
 		if strings.ToUpper(actualHex) != strings.ToUpper(expectedChecksum) {
 			allValid = false
 		}
 	}
-	
+
 	if err := scanner.Err(); err != nil {
 		return false, fmt.Errorf("failed to read SFV file: %w", err)
 	}
-	
+
 	return allValid, nil
 }
 
 // CreateSFVForDirectory creates an SFV file for all files in a directory
 func (g *Generator) CreateSFVForDirectory(dirPath string, recursive bool) (string, error) {
 	var filePaths []string
-	
+
 	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		
+
 		if !info.IsDir() && !strings.HasSuffix(strings.ToLower(info.Name()), ".sfv") {
 			filePaths = append(filePaths, path)
 		}
-		
+
 		if !recursive && info.IsDir() && path != dirPath {
 			return filepath.SkipDir
 		}
-		
+
 		return nil
 	})
-	
+
 	if err != nil {
 		return "", fmt.Errorf("failed to walk directory: %w", err)
 	}
-	
+
 	if len(filePaths) == 0 {
 		return "", fmt.Errorf("no files found in directory")
 	}
-	
+
 	sfvName := fmt.Sprintf("%s.sfv", filepath.Base(dirPath))
 	return g.CreateSFV(filePaths, sfvName)
 }
@@ -175,30 +195,30 @@ func (g *Generator) ReadSFV(sfvPath string) (map[string]string, error) {
 
 	checksums := make(map[string]string)
 	scanner := bufio.NewScanner(file)
-	
+
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		
+
 		// Skip empty lines and comments
 		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
 			continue
 		}
-		
+
 		// Parse SFV entry
 		parts := strings.Fields(line)
 		if len(parts) != 2 {
 			continue
 		}
-		
+
 		fileName := parts[0]
 		checksum := parts[1]
 		checksums[fileName] = checksum
 	}
-	
+
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("failed to read SFV file: %w", err)
 	}
-	
+
 	return checksums, nil
 }
 
@@ -209,7 +229,7 @@ func (g *Generator) UpdateSFV(sfvPath string, filePaths []string) error {
 	if err != nil {
 		return err
 	}
-	
+
 	// Calculate new checksums
 	newChecksums := make(map[string]string)
 	for _, filePath := range filePaths {
@@ -217,20 +237,20 @@ func (g *Generator) UpdateSFV(sfvPath string, filePaths []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to calculate checksum for %s: %w", filePath, err)
 		}
-		
+
 		relPath, err := filepath.Rel(filepath.Dir(sfvPath), filePath)
 		if err != nil {
 			relPath = filepath.Base(filePath)
 		}
-		
+
 		newChecksums[relPath] = fmt.Sprintf("%08X", checksum)
 	}
-	
+
 	// Merge checksums
 	for k, v := range newChecksums {
 		existing[k] = v
 	}
-	
+
 	// Write updated SFV
 	file, err := os.Create(sfvPath)
 	if err != nil {

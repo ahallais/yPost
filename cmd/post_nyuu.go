@@ -93,25 +93,50 @@ func runPostNyuu(cmd *cobra.Command, args []string) error {
 
 	log.Info("[1/5] Splitting %s", baseName)
 	split := splitter.NewSplitter(cfg.Posting.MaxPartSize)
-	parts, err := split.SplitFile(input, workDir)
+	splitProgress := progress.NewStageTracker("Splitting", info.Size())
+	parts, err := split.SplitFileWithProgress(input, workDir, splitProgress.Add)
 	if err != nil {
 		return fmt.Errorf("split input: %w", err)
 	}
+	splitProgress.Finish()
 	partPaths := filePartPaths(parts)
 
 	log.Info("[2/5] Creating verification and recovery files")
 	var sfvPath string
 	if cfg.SFV.Enabled {
-		sfvPath, err = sfv.NewGenerator(workDir).CreateSFV(partPaths, baseName+".sfv")
+		sfvProgress := progress.NewStageTracker("SFV", totalFileSize(partPaths))
+		sfvPath, err = sfv.NewGenerator(workDir).CreateSFVWithProgress(partPaths, baseName+".sfv", sfvProgress.Add)
 		if err != nil {
 			return fmt.Errorf("create SFV: %w", err)
 		}
+		sfvProgress.Finish()
 	}
 	var par2Files []string
 	if cfg.Par2.Enabled {
-		par2Files, err = par2.NewGenerator(workDir).CreatePAR2ForParts(partPaths, baseName, cfg.Par2.Redundancy)
+		parGenerator := par2.NewGenerator(workDir)
+		var parProgress *progress.StageTracker
+		var parPhase string
+		var parCompleted int64
+		parGenerator.SetProgressCallback(func(phase string, completed, total int64) {
+			if phase != parPhase {
+				if parProgress != nil {
+					parProgress.Finish()
+				}
+				parPhase = phase
+				parCompleted = 0
+				parProgress = progress.NewCounterTracker(phase, total)
+			}
+			if completed > parCompleted {
+				parProgress.Add(completed - parCompleted)
+				parCompleted = completed
+			}
+		})
+		par2Files, err = parGenerator.CreatePAR2ForParts(partPaths, baseName, cfg.Par2.Redundancy)
 		if err != nil {
 			return fmt.Errorf("create PAR2: %w", err)
+		}
+		if parProgress != nil {
+			parProgress.Finish()
 		}
 	}
 
@@ -147,12 +172,14 @@ func runPostNyuu(cmd *cobra.Command, args []string) error {
 	// posting session and one NZB/release; PAR2 is not a separate release.
 	files := postingOrder(sfvPath, par2Files, partPaths)
 	log.Info("[4/5] Posting %d release files", len(files))
+	uploadProgress := progress.NewStageTracker("Upload", totalFileSize(files))
 	enc := yenc.NewEncoder(cfg.Posting.MaxLineLength)
 	for _, path := range files {
-		if err := postNyuuFile(pool, path, cfg, enc, nzbGen, log); err != nil {
+		if err := postNyuuFile(pool, path, cfg, enc, nzbGen, log, uploadProgress.Add); err != nil {
 			return err
 		}
 	}
+	uploadProgress.Finish()
 
 	log.Info("[5/5] Finalizing NZB")
 	if err := nzbGen.Close(); err != nil {
@@ -242,7 +269,7 @@ func postingOrder(sfvPath string, par2Files, dataFiles []string) []string {
 	return files
 }
 
-func postNyuuFile(pool *nntp.ConnectionPool, path string, cfg *models.Config, enc *yenc.Encoder, nzbGen *nzb.NyuuGenerator, log *logger.Logger) error {
+func postNyuuFile(pool *nntp.ConnectionPool, path string, cfg *models.Config, enc *yenc.Encoder, nzbGen *nzb.NyuuGenerator, log *logger.Logger, onProgress func(int64)) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
@@ -276,11 +303,24 @@ func postNyuuFile(pool *nntp.ConnectionPool, path string, cfg *models.Config, en
 			return err
 		}
 		tracker.EmitProgress(part, int64(len(chunk)))
+		if onProgress != nil {
+			onProgress(int64(len(chunk)))
+		}
 		log.LogUploadProgress(name, part, len(chunks), int64(len(chunk)))
 		offset += int64(len(chunk))
 	}
 	tracker.EmitComplete()
 	return nzbGen.EndFile()
+}
+
+func totalFileSize(paths []string) int64 {
+	var total int64
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil {
+			total += info.Size()
+		}
+	}
+	return total
 }
 
 func splitDataIntoChunks(data []byte, size int) [][]byte {
