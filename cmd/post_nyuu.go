@@ -175,8 +175,12 @@ func runPostNyuu(cmd *cobra.Command, args []string) error {
 	uploadProgress := progress.NewStageTracker("Upload", totalFileSize(files))
 	enc := yenc.NewEncoder(cfg.Posting.MaxLineLength)
 	for _, path := range files {
-		if err := postNyuuFile(pool, path, cfg, enc, nzbGen, log, uploadProgress.Add); err != nil {
+		if err := postNyuuFile(pool, path, cfg, enc, nzbGen, log); err != nil {
 			return err
+		}
+		// Keep aggregate output separate from the live per-file progress bar.
+		if info, err := os.Stat(path); err == nil {
+			uploadProgress.Add(info.Size())
 		}
 	}
 	uploadProgress.Finish()
@@ -269,7 +273,7 @@ func postingOrder(sfvPath string, par2Files, dataFiles []string) []string {
 	return files
 }
 
-func postNyuuFile(pool *nntp.ConnectionPool, path string, cfg *models.Config, enc *yenc.Encoder, nzbGen *nzb.NyuuGenerator, log *logger.Logger, onProgress func(int64)) error {
+func postNyuuFile(pool *nntp.ConnectionPool, path string, cfg *models.Config, enc *yenc.Encoder, nzbGen *nzb.NyuuGenerator, log *logger.Logger) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
@@ -303,9 +307,6 @@ func postNyuuFile(pool *nntp.ConnectionPool, path string, cfg *models.Config, en
 			return err
 		}
 		tracker.EmitProgress(part, int64(len(chunk)))
-		if onProgress != nil {
-			onProgress(int64(len(chunk)))
-		}
 		log.LogUploadProgress(name, part, len(chunks), int64(len(chunk)))
 		offset += int64(len(chunk))
 	}
