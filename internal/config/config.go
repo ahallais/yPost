@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/viper"
 	"ypost/internal/utils"
@@ -67,6 +68,7 @@ func LoadConfig(configPath string) (*models.Config, string, error) {
 			config.NNTP.Servers = []models.ServerConfig{server}
 		}
 	}
+	applyServerDefaults(&config)
 
 	// Handle newsgroup/group field mapping
 	if config.Posting.Group == "" && config.Posting.Newsgroup != "" {
@@ -101,6 +103,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("nntp.password", "your-password")
 	v.SetDefault("nntp.ssl", true)
 	v.SetDefault("nntp.connections", 4)
+	v.SetDefault("nntp.connect_timeout", "30s")
+	v.SetDefault("nntp.command_timeout", "30s")
+	v.SetDefault("nntp.post_timeout", "120s")
+	v.SetDefault("nntp.reconnect_delay", "15s")
+	v.SetDefault("nntp.request_retries", 5)
+	v.SetDefault("nntp.post_retries", 1)
 
 	// Posting defaults
 	v.SetDefault("posting.group", "alt.binaries.test")
@@ -133,7 +141,8 @@ func validateConfig(config *models.Config) error {
 		return fmt.Errorf("at least one NNTP server must be configured")
 	}
 
-	for i, server := range config.NNTP.Servers {
+	for i := range config.NNTP.Servers {
+		server := &config.NNTP.Servers[i]
 		if server.Host == "" {
 			return fmt.Errorf("server %d: host is required", i+1)
 		}
@@ -142,6 +151,12 @@ func validateConfig(config *models.Config) error {
 		}
 		if server.MaxConns <= 0 || server.MaxConns > 50 {
 			server.MaxConns = 4 // Default
+		}
+		if server.ConnectTimeout < 0 || server.CommandTimeout < 0 || server.PostTimeout < 0 || server.ReconnectDelay < 0 {
+			return fmt.Errorf("server %d: timeout and delay values cannot be negative", i+1)
+		}
+		if server.RequestRetries < 0 || server.PostRetries < 0 {
+			return fmt.Errorf("server %d: retry counts cannot be negative", i+1)
 		}
 	}
 
@@ -162,6 +177,30 @@ func validateConfig(config *models.Config) error {
 	}
 
 	return nil
+}
+
+func applyServerDefaults(config *models.Config) {
+	for i := range config.NNTP.Servers {
+		server := &config.NNTP.Servers[i]
+		if server.ConnectTimeout == 0 {
+			server.ConnectTimeout = config.NNTP.ConnectTimeout
+		}
+		if server.CommandTimeout == 0 {
+			server.CommandTimeout = config.NNTP.CommandTimeout
+		}
+		if server.PostTimeout == 0 {
+			server.PostTimeout = config.NNTP.PostTimeout
+		}
+		if server.ReconnectDelay == 0 {
+			server.ReconnectDelay = config.NNTP.ReconnectDelay
+		}
+		if server.RequestRetries == 0 {
+			server.RequestRetries = config.NNTP.RequestRetries
+		}
+		if server.PostRetries == 0 {
+			server.PostRetries = config.NNTP.PostRetries
+		}
+	}
 }
 
 // SaveConfig saves configuration to file
@@ -209,6 +248,12 @@ func CreateSampleConfig(configPath string) error {
 		MaxConns: 8,
 	}
 	sampleConfig.NNTP.Servers = []models.ServerConfig{defaultServer}
+	sampleConfig.NNTP.ConnectTimeout = 30 * time.Second
+	sampleConfig.NNTP.CommandTimeout = 30 * time.Second
+	sampleConfig.NNTP.PostTimeout = 120 * time.Second
+	sampleConfig.NNTP.ReconnectDelay = 15 * time.Second
+	sampleConfig.NNTP.RequestRetries = 5
+	sampleConfig.NNTP.PostRetries = 1
 
 	// Posting configuration
 	sampleConfig.Posting.Group = "alt.binaries.test"

@@ -7,25 +7,31 @@ import (
 // Config represents the application configuration
 type Config struct {
 	NNTP struct {
-		Servers     []ServerConfig `mapstructure:"servers"`
-		Server      string         `mapstructure:"server"`
-		Port        int           `mapstructure:"port"`
-		Username    string         `mapstructure:"username"`
-		Password    string         `mapstructure:"password"`
-		SSL         bool          `mapstructure:"ssl"`
-		Connections int           `mapstructure:"connections"`
+		Servers        []ServerConfig `mapstructure:"servers"`
+		Server         string         `mapstructure:"server"`
+		Port           int            `mapstructure:"port"`
+		Username       string         `mapstructure:"username"`
+		Password       string         `mapstructure:"password"`
+		SSL            bool           `mapstructure:"ssl"`
+		Connections    int            `mapstructure:"connections"`
+		ConnectTimeout time.Duration  `mapstructure:"connect_timeout"`
+		CommandTimeout time.Duration  `mapstructure:"command_timeout"`
+		PostTimeout    time.Duration  `mapstructure:"post_timeout"`
+		ReconnectDelay time.Duration  `mapstructure:"reconnect_delay"`
+		RequestRetries int            `mapstructure:"request_retries"`
+		PostRetries    int            `mapstructure:"post_retries"`
 	} `mapstructure:"nntp"`
 	Posting struct {
 		Group           string            `mapstructure:"group"`
-		Newsgroup      string            `mapstructure:"newsgroup"`
-		From           string            `mapstructure:"from"`
-		PosterName     string            `mapstructure:"poster_name"`
-		PosterEmail    string            `mapstructure:"poster_email"`
+		Newsgroup       string            `mapstructure:"newsgroup"`
+		From            string            `mapstructure:"from"`
+		PosterName      string            `mapstructure:"poster_name"`
+		PosterEmail     string            `mapstructure:"poster_email"`
 		SubjectTemplate string            `mapstructure:"subject_template"`
-		MaxLineLength  int               `mapstructure:"max_line_length"`
-		MaxPartSize    int64             `mapstructure:"max_part_size"`
-		MaxArticleSize int64             `mapstructure:"max_article_size"`
-		CustomHeaders  map[string]string `mapstructure:"custom_headers"`
+		MaxLineLength   int               `mapstructure:"max_line_length"`
+		MaxPartSize     int64             `mapstructure:"max_part_size"`
+		MaxArticleSize  int64             `mapstructure:"max_article_size"`
+		CustomHeaders   map[string]string `mapstructure:"custom_headers"`
 	} `mapstructure:"posting"`
 	Output struct {
 		OutputDir string `mapstructure:"output_dir"`
@@ -54,12 +60,18 @@ type Config struct {
 
 // ServerConfig represents NNTP server configuration
 type ServerConfig struct {
-	Host     string `mapstructure:"host"`
-	Port     int    `mapstructure:"port"`
-	Username string `mapstructure:"username"`
-	Password string `mapstructure:"password"`
-	SSL      bool   `mapstructure:"ssl"`
-	MaxConns int    `mapstructure:"max_connections"`
+	Host           string        `mapstructure:"host"`
+	Port           int           `mapstructure:"port"`
+	Username       string        `mapstructure:"username"`
+	Password       string        `mapstructure:"password"`
+	SSL            bool          `mapstructure:"ssl"`
+	MaxConns       int           `mapstructure:"max_connections"`
+	ConnectTimeout time.Duration `mapstructure:"connect_timeout"`
+	CommandTimeout time.Duration `mapstructure:"command_timeout"`
+	PostTimeout    time.Duration `mapstructure:"post_timeout"`
+	ReconnectDelay time.Duration `mapstructure:"reconnect_delay"`
+	RequestRetries int           `mapstructure:"request_retries"`
+	PostRetries    int           `mapstructure:"post_retries"`
 }
 
 // FilePart represents a split file part
@@ -85,9 +97,9 @@ type PostSegment struct {
 
 // NZBFile represents the NZB file structure
 type NZBFile struct {
-	XMLName   string    `xml:"nzb"`
-	Meta      NZBMeta   `xml:"head"`
-	Segments  []NZBSegment `xml:"file"`
+	XMLName  string       `xml:"nzb"`
+	Meta     NZBMeta      `xml:"head"`
+	Segments []NZBSegment `xml:"file"`
 }
 
 type NZBMeta struct {
@@ -95,11 +107,11 @@ type NZBMeta struct {
 }
 
 type NZBSegment struct {
-	Poster    string      `xml:"poster,attr"`
-	Date      int64       `xml:"date,attr"`
-	Subject   string      `xml:"subject,attr"`
-	Groups    []string    `xml:"groups>group"`
-	Segments  []NZBPart   `xml:"segments>segment"`
+	Poster   string    `xml:"poster,attr"`
+	Date     int64     `xml:"date,attr"`
+	Subject  string    `xml:"subject,attr"`
+	Groups   []string  `xml:"groups>group"`
+	Segments []NZBPart `xml:"segments>segment"`
 }
 
 type NZBPart struct {

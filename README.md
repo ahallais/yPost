@@ -37,6 +37,12 @@ with `--config`.
 
 ```yaml
 nntp:
+  connect_timeout: 30s
+  command_timeout: 30s
+  post_timeout: 120s
+  reconnect_delay: 15s
+  request_retries: 5
+  post_retries: 1
   servers:
     - host: "news.example.com"
       port: 563
@@ -80,6 +86,16 @@ logging:
 For compatibility, the legacy single-server `nntp.server` form and
 `posting.newsgroup` are also accepted. The legacy `splitting.max_file_size`
 setting, when present, takes precedence over `posting.max_part_size`.
+For a server entry, `max_connections` controls the number of concurrent NNTP
+article workers; legacy single-server configurations use `nntp.connections`.
+Each worker owns one connection and buffers at most one
+`posting.max_article_size` chunk, keeping upload memory bounded independently
+of the physical split-file size. If a connection is reset or reaches EOF while
+posting, that worker reconnects and retries the article up to `request_retries`
+times with the same Message-ID. Code `441` responses use the independent
+`post_retries` limit. On Linux, yPost reads `MemAvailable` before connecting and
+reduces the requested connection count when the estimated yEnc worker memory
+would consume more than half of available memory.
 
 The subject template supports `Filename`, `Index`, `Total`, `ChunkIndex`,
 `TotalChunks`, and `Size`, using Go template syntax as shown above.
