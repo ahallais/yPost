@@ -586,6 +586,13 @@ func NewConnectionPool(config *models.ServerConfig, maxConns int) *ConnectionPoo
 // The returned slice is stable and lets callers dedicate one client to each
 // worker instead of sharing busy connections through round-robin selection.
 func (p *ConnectionPool) ConnectAll() ([]*Client, error) {
+	return p.ConnectAllWithProgress(nil)
+}
+
+// ConnectAllWithProgress creates and authenticates all clients and reports
+// each completed connection. Connections are intentionally opened
+// sequentially to keep TLS handshakes inexpensive on small NAS systems.
+func (p *ConnectionPool) ConnectAllWithProgress(progress func(completed, total int)) ([]*Client, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -599,6 +606,9 @@ func (p *ConnectionPool) ConnectAll() ([]*Client, error) {
 			return nil, err
 		}
 		p.clients = append(p.clients, client)
+		if progress != nil {
+			progress(len(p.clients), p.maxConns)
+		}
 	}
 
 	clients := make([]*Client, len(p.clients))

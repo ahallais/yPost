@@ -136,6 +136,30 @@ func TestConnectionPoolConnectAllCreatesConfiguredClients(t *testing.T) {
 	}
 }
 
+func TestConnectionPoolConnectAllReportsProgress(t *testing.T) {
+	pool := NewConnectionPool(&models.ServerConfig{}, 3)
+	pool.newClient = func(config *models.ServerConfig) *Client {
+		return &Client{config: config, connected: true}
+	}
+
+	var completed []int
+	clients, err := pool.ConnectAllWithProgress(func(current, total int) {
+		if total != 3 {
+			t.Fatalf("progress total = %d, want 3", total)
+		}
+		completed = append(completed, current)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clients) != 3 {
+		t.Fatalf("connected clients = %d, want 3", len(clients))
+	}
+	if len(completed) != 3 || completed[0] != 1 || completed[1] != 2 || completed[2] != 3 {
+		t.Fatalf("progress = %v, want [1 2 3]", completed)
+	}
+}
+
 type servedArticle struct {
 	messageID string
 	err       error

@@ -30,9 +30,9 @@ func (g *Generator) SetProgressCallback(callback func(phase string, completed, t
 	g.progress = callback
 }
 
-func (g *Generator) reportProgress(phase string, completed, total int) {
+func (g *Generator) reportProgress(phase string, completed, total int64) {
 	if g.progress != nil {
-		g.progress(phase, int64(completed), int64(total))
+		g.progress(phase, completed, total)
 	}
 }
 
@@ -86,7 +86,7 @@ func (g *Generator) CreatePAR2ForParts(parts []string, baseName string, redundan
 	defer recoveryData.close()
 
 	// Write main PAR2 index file (control file with file list)
-	err = g.writePAR2IndexFileForParts(par2File, parts, sliceSize)
+	err = g.writePAR2IndexFileForParts(par2File, parts, sliceSize, totalSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to write PAR2 index file: %w", err)
 	}
@@ -260,7 +260,7 @@ func (g *Generator) generateRecoveryDataBatched(paths []string, sliceSize int, r
 		progressbar.OptionThrottle(200*time.Millisecond),
 	)
 	progressTotal := totalDataShards + totalParityShards
-	g.reportProgress("PAR2 encoding", 0, progressTotal)
+	g.reportProgress("PAR2 encoding", 0, int64(progressTotal))
 
 	dataDone, parityDone := 0, 0
 	for dataDone < totalDataShards {
@@ -283,10 +283,13 @@ func (g *Generator) generateRecoveryDataBatched(paths []string, sliceSize int, r
 				return fail(fmt.Errorf("read data shard %d: %w", dataDone+i, err))
 			}
 			_ = bar.Add(1)
-			g.reportProgress("PAR2 encoding", dataDone+i+1+parityDone, progressTotal)
+			g.reportProgress("PAR2 encoding", int64(dataDone+i+1+parityDone), int64(progressTotal))
 		}
 		for i := dataInBatch; i < len(shards); i++ {
 			shards[i] = make([]byte, sliceSize)
+		}
+		if dataDone+dataInBatch == totalDataShards {
+			fmt.Println("Finalizing the last PAR2 Reed-Solomon batch; this can take some time on a slower NAS")
 		}
 		if err := enc.Encode(shards); err != nil {
 			return fail(fmt.Errorf("encode batch starting at shard %d: %w", dataDone, err))
@@ -296,7 +299,7 @@ func (g *Generator) generateRecoveryDataBatched(paths []string, sliceSize int, r
 				return fail(fmt.Errorf("write recovery spool: %w", err))
 			}
 			_ = bar.Add(1)
-			g.reportProgress("PAR2 encoding", dataDone+dataInBatch+parityDone+parityIndex+1, progressTotal)
+			g.reportProgress("PAR2 encoding", int64(dataDone+dataInBatch+parityDone+parityIndex+1), int64(progressTotal))
 		}
 		dataDone += dataInBatch
 		parityDone += parityInBatch
@@ -884,7 +887,7 @@ func (g *Generator) createStandardVOLFilesFromSpool(baseName string, recovery *r
 		progressbar.OptionClearOnFinish(),
 		progressbar.OptionThrottle(100*time.Millisecond),
 	)
-	g.reportProgress("PAR2 volumes", 0, recovery.blocks)
+	g.reportProgress("PAR2 volumes", 0, int64(recovery.blocks))
 
 	var volFiles []string
 	blockIndex, volIndex := 0, 0
@@ -917,7 +920,7 @@ func (g *Generator) createStandardVOLFilesFromSpool(baseName string, recovery *r
 		blockIndex += blocksInVolume
 		volIndex++
 		_ = volBar.Add(blocksInVolume)
-		g.reportProgress("PAR2 volumes", blockIndex, recovery.blocks)
+		g.reportProgress("PAR2 volumes", int64(blockIndex), int64(recovery.blocks))
 	}
 	_ = volBar.Finish()
 	return volFiles, nil
@@ -1076,7 +1079,7 @@ func (g *Generator) xorPartIntoRecoverySlice(partPath string, sliceOffset int, s
 }
 
 // writePAR2IndexFileForParts writes the main PAR2 index file for multiple parts
-func (g *Generator) writePAR2IndexFileForParts(par2File string, parts []string, sliceSize int) error {
+func (g *Generator) writePAR2IndexFileForParts(par2File string, parts []string, sliceSize int, totalSize int64) error {
 	file, err := os.Create(par2File)
 	if err != nil {
 		return fmt.Errorf("failed to create PAR2 index file: %w", err)
@@ -1089,14 +1092,45 @@ func (g *Generator) writePAR2IndexFileForParts(par2File string, parts []string, 
 		return fmt.Errorf("failed to write PAR2 header: %w", err)
 	}
 
+	const hashBufferSize = 256 * 1024
+	hashBuffer := make([]byte, hashBufferSize)
+	hashedBytes := int64(0)
+	g.reportProgress("PAR2 index hashing", 0, totalSize)
+
 	// Write file descriptions for all parts
 	for _, partPath := range parts {
 		fileInfo, err := os.Stat(partPath)
 		if err != nil {
-			continue // Skip missing parts
+			return fmt.Errorf("stat part %s for PAR2 index: %w", partPath, err)
 		}
 
-		fileHash := g.calculateFileHash(partPath)
+		part, err := os.Open(partPath)
+		if err != nil {
+			return fmt.Errorf("open part %s for PAR2 index: %w", partPath, err)
+		}
+		hash := sha256.New()
+		for {
+			n, readErr := part.Read(hashBuffer)
+			if n > 0 {
+				if _, err := hash.Write(hashBuffer[:n]); err != nil {
+					_ = part.Close()
+					return fmt.Errorf("hash part %s for PAR2 index: %w", partPath, err)
+				}
+				hashedBytes += int64(n)
+				g.reportProgress("PAR2 index hashing", hashedBytes, totalSize)
+			}
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				_ = part.Close()
+				return fmt.Errorf("read part %s for PAR2 index: %w", partPath, readErr)
+			}
+		}
+		if err := part.Close(); err != nil {
+			return fmt.Errorf("close part %s after PAR2 index hashing: %w", partPath, err)
+		}
+		fileHash := hash.Sum(nil)
 		numSlices := int((fileInfo.Size() + int64(sliceSize) - 1) / int64(sliceSize))
 
 		// Create file description for this part
@@ -1105,6 +1139,7 @@ func (g *Generator) writePAR2IndexFileForParts(par2File string, parts []string, 
 			return fmt.Errorf("failed to write file description for %s: %w", partPath, err)
 		}
 	}
+	g.reportProgress("PAR2 index hashing", totalSize, totalSize)
 
 	return nil
 }

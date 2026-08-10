@@ -185,12 +185,22 @@ func runPostNyuu(cmd *cobra.Command, args []string) error {
 	} else {
 		log.Warn("Available memory could not be detected; using configured %d NNTP connections: %v", server.MaxConns, memoryErr)
 	}
+	log.Info("Opening and authenticating %d NNTP connections; this can take some time on a slower NAS", server.MaxConns)
 	pool := nntp.NewConnectionPool(&server, server.MaxConns)
 	defer pool.CloseAll()
-	clients, err := pool.ConnectAll()
+	connectionProgress := progress.NewCounterTracker("NNTP connections", int64(server.MaxConns))
+	connected := int64(0)
+	clients, err := pool.ConnectAllWithProgress(func(completed, _ int) {
+		completed64 := int64(completed)
+		if completed64 > connected {
+			connectionProgress.Add(completed64 - connected)
+			connected = completed64
+		}
+	})
 	if err != nil {
 		return fmt.Errorf("connect NNTP workers: %w", err)
 	}
+	connectionProgress.Finish()
 	for index, client := range clients {
 		worker := index + 1
 		client.SetRetryHook(func(event nntp.RetryEvent) {

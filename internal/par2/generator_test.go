@@ -99,7 +99,7 @@ func TestPAR2GenerationForParts(t *testing.T) {
 	if len(par2Files) < 2 {
 		t.Fatal("Expected multiple PAR2 files (index + volumes)")
 	}
-	if !completedPhases["PAR2 encoding"] || !completedPhases["PAR2 volumes"] {
+	if !completedPhases["PAR2 encoding"] || !completedPhases["PAR2 index hashing"] || !completedPhases["PAR2 volumes"] {
 		t.Fatalf("incomplete progress phases: %v", completedPhases)
 	}
 
