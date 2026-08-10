@@ -2,10 +2,14 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
@@ -93,25 +97,50 @@ func runPostNyuu(cmd *cobra.Command, args []string) error {
 
 	log.Info("[1/5] Splitting %s", baseName)
 	split := splitter.NewSplitter(cfg.Posting.MaxPartSize)
-	parts, err := split.SplitFile(input, workDir)
+	splitProgress := progress.NewStageTracker("Splitting", info.Size())
+	parts, err := split.SplitFileWithProgress(input, workDir, splitProgress.Add)
 	if err != nil {
 		return fmt.Errorf("split input: %w", err)
 	}
+	splitProgress.Finish()
 	partPaths := filePartPaths(parts)
 
 	log.Info("[2/5] Creating verification and recovery files")
 	var sfvPath string
 	if cfg.SFV.Enabled {
-		sfvPath, err = sfv.NewGenerator(workDir).CreateSFV(partPaths, baseName+".sfv")
+		sfvProgress := progress.NewStageTracker("SFV", totalFileSize(partPaths))
+		sfvPath, err = sfv.NewGenerator(workDir).CreateSFVWithProgress(partPaths, baseName+".sfv", sfvProgress.Add)
 		if err != nil {
 			return fmt.Errorf("create SFV: %w", err)
 		}
+		sfvProgress.Finish()
 	}
 	var par2Files []string
 	if cfg.Par2.Enabled {
-		par2Files, err = par2.NewGenerator(workDir).CreatePAR2ForParts(partPaths, baseName, cfg.Par2.Redundancy)
+		parGenerator := par2.NewGenerator(workDir)
+		var parProgress *progress.StageTracker
+		var parPhase string
+		var parCompleted int64
+		parGenerator.SetProgressCallback(func(phase string, completed, total int64) {
+			if phase != parPhase {
+				if parProgress != nil {
+					parProgress.Finish()
+				}
+				parPhase = phase
+				parCompleted = 0
+				parProgress = progress.NewCounterTracker(phase, total)
+			}
+			if completed > parCompleted {
+				parProgress.Add(completed - parCompleted)
+				parCompleted = completed
+			}
+		})
+		par2Files, err = parGenerator.CreatePAR2ForParts(partPaths, baseName, cfg.Par2.Redundancy)
 		if err != nil {
 			return fmt.Errorf("create PAR2: %w", err)
+		}
+		if parProgress != nil {
+			parProgress.Finish()
 		}
 	}
 
@@ -140,19 +169,40 @@ func runPostNyuu(cmd *cobra.Command, args []string) error {
 
 	log.Info("[3/5] Connecting to Usenet")
 	server := cfg.NNTP.Servers[0]
+	// PAR2 generation can leave a large idle heap behind. Return it before
+	// measuring available memory and allocating upload worker buffers.
+	debug.FreeOSMemory()
+	if memoryAvailable, memoryErr := availableMemory(); memoryErr == nil {
+		connections, perWorker := memoryAwareConnectionLimit(server.MaxConns, cfg.Posting.MaxArticleSize, memoryAvailable)
+		if connections < server.MaxConns {
+			log.Warn("Reducing NNTP connections from %d to %d: %s available memory, estimated %s per worker",
+				server.MaxConns, connections, formatMemory(memoryAvailable), formatMemory(perWorker))
+		} else {
+			log.Info("Using %d NNTP connections with %s available memory (estimated %s per worker)",
+				connections, formatMemory(memoryAvailable), formatMemory(perWorker))
+		}
+		server.MaxConns = connections
+	} else {
+		log.Warn("Available memory could not be detected; using configured %d NNTP connections: %v", server.MaxConns, memoryErr)
+	}
 	pool := nntp.NewConnectionPool(&server, server.MaxConns)
 	defer pool.CloseAll()
+	clients, err := pool.ConnectAll()
+	if err != nil {
+		return fmt.Errorf("connect NNTP workers: %w", err)
+	}
 
 	// Small metadata first, then data, then recovery volumes. They remain one
 	// posting session and one NZB/release; PAR2 is not a separate release.
 	files := postingOrder(sfvPath, par2Files, partPaths)
 	log.Info("[4/5] Posting %d release files", len(files))
-	enc := yenc.NewEncoder(cfg.Posting.MaxLineLength)
+	uploadProgress := progress.NewStageTracker("Upload", totalFileSize(files))
 	for _, path := range files {
-		if err := postNyuuFile(pool, path, cfg, enc, nzbGen, log); err != nil {
+		if err := postNyuuFile(clients, path, cfg, nzbGen, log, uploadProgress.Add); err != nil {
 			return err
 		}
 	}
+	uploadProgress.Finish()
 
 	log.Info("[5/5] Finalizing NZB")
 	if err := nzbGen.Close(); err != nil {
@@ -242,14 +292,62 @@ func postingOrder(sfvPath string, par2Files, dataFiles []string) []string {
 	return files
 }
 
-func postNyuuFile(pool *nntp.ConnectionPool, path string, cfg *models.Config, enc *yenc.Encoder, nzbGen *nzb.NyuuGenerator, log *logger.Logger) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
+type articlePoster interface {
+	PostArticleContext(context.Context, string, string, string, string, map[string]string) (string, error)
+}
+
+type articleTask struct {
+	part   int
+	offset int64
+	size   int
+}
+
+type articleResult struct {
+	part      int
+	size      int64
+	messageID string
+	err       error
+}
+
+func postNyuuFile(clients []*nntp.Client, path string, cfg *models.Config, nzbGen *nzb.NyuuGenerator, log *logger.Logger, uploaded func(int64)) error {
+	posters := make([]articlePoster, len(clients))
+	for i, client := range clients {
+		posters[i] = client
 	}
+	return postNyuuFileWithPosters(posters, path, cfg, nzbGen, log, uploaded)
+}
+
+func postNyuuFileWithPosters(posters []articlePoster, path string, cfg *models.Config, nzbGen *nzb.NyuuGenerator, log *logger.Logger, uploaded func(int64)) error {
+	if len(posters) == 0 {
+		return fmt.Errorf("post %s: no NNTP workers available", filepath.Base(path))
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+	fileSize := info.Size()
 	name := filepath.Base(path)
-	articleSize := int(cfg.Posting.MaxArticleSize)
-	chunks := splitDataIntoChunks(data, articleSize)
+	articleSize := cfg.Posting.MaxArticleSize
+	if articleSize <= 0 {
+		return fmt.Errorf("post %s: article size must be positive", name)
+	}
+	maxInt := int64(^uint(0) >> 1)
+	if articleSize > maxInt && fileSize > maxInt {
+		return fmt.Errorf("post %s: article size exceeds platform limit", name)
+	}
+	totalParts := 0
+	if fileSize > 0 {
+		partCount := (fileSize-1)/articleSize + 1
+		if partCount > maxInt {
+			return fmt.Errorf("post %s: article count exceeds platform limit", name)
+		}
+		totalParts = int(partCount)
+	}
 	groups := strings.Split(cfg.Posting.Group, ",")
 	for i := range groups {
 		groups[i] = strings.TrimSpace(groups[i])
@@ -257,42 +355,114 @@ func postNyuuFile(pool *nntp.ConnectionPool, path string, cfg *models.Config, en
 	if err := nzbGen.StartFile(name, groups, time.Now()); err != nil {
 		return err
 	}
-	tracker := progress.NewTracker(name, len(chunks), int64(len(data)))
-	var offset int64 = 1
-	for i, chunk := range chunks {
-		part := i + 1
-		body := enc.EncodePart(chunk, name, part, len(chunks), int64(len(data)), offset)
-		subj := renderSubject(cfg.Posting.SubjectTemplate, name, part, len(chunks), int64(len(data)))
-		client, err := pool.GetClient()
-		if err != nil {
-			return fmt.Errorf("get NNTP client: %w", err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	jobs := make(chan articleTask)
+	results := make(chan articleResult, len(posters))
+	var workers sync.WaitGroup
+	for _, poster := range posters {
+		workers.Add(1)
+		go func(poster articlePoster) {
+			defer workers.Done()
+			encoder := yenc.NewEncoder(cfg.Posting.MaxLineLength)
+			var buffer []byte
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case task, ok := <-jobs:
+					if !ok {
+						return
+					}
+					if ctx.Err() != nil {
+						return
+					}
+					if cap(buffer) < task.size {
+						buffer = make([]byte, task.size)
+					}
+					chunk := buffer[:task.size]
+					n, err := file.ReadAt(chunk, task.offset)
+					if err != nil && err != io.EOF {
+						results <- articleResult{part: task.part, err: fmt.Errorf("read article: %w", err)}
+						cancel()
+						return
+					}
+					if n != len(chunk) {
+						results <- articleResult{part: task.part, err: fmt.Errorf("read article: %w", io.ErrUnexpectedEOF)}
+						cancel()
+						return
+					}
+					body := encoder.EncodePart(chunk, name, task.part, totalParts, fileSize, task.offset+1)
+					subj := renderSubject(cfg.Posting.SubjectTemplate, name, task.part, totalParts, fileSize)
+					messageID, err := poster.PostArticleContext(ctx, cfg.Posting.Group, subj,
+						fmt.Sprintf("%s <%s>", cfg.Posting.PosterName, cfg.Posting.PosterEmail), body, cfg.Posting.CustomHeaders)
+					if err != nil {
+						results <- articleResult{part: task.part, err: err}
+						cancel()
+						return
+					}
+					results <- articleResult{part: task.part, size: int64(task.size), messageID: strings.Trim(messageID, "<>")}
+				}
+			}
+		}(poster)
+	}
+
+	go func() {
+		defer close(jobs)
+		for part := 1; part <= totalParts; part++ {
+			offset := int64(part-1) * articleSize
+			size := articleSize
+			if remaining := fileSize - offset; remaining < size {
+				size = remaining
+			}
+			select {
+			case jobs <- articleTask{part: part, offset: offset, size: int(size)}:
+			case <-ctx.Done():
+				return
+			}
 		}
-		messageID, err := client.PostArticle(cfg.Posting.Group, subj,
-			fmt.Sprintf("%s <%s>", cfg.Posting.PosterName, cfg.Posting.PosterEmail), body, cfg.Posting.CustomHeaders)
-		if err != nil {
-			return fmt.Errorf("post %s article %d/%d: %w", name, part, len(chunks), err)
+	}()
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+
+	ordered := make([]articleResult, totalParts)
+	var firstErr error
+	for result := range results {
+		if result.err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("post %s article %d/%d: %w", name, result.part, totalParts, result.err)
+				cancel()
+			}
+			continue
 		}
-		if err := nzbGen.AddSegment(strings.Trim(messageID, "<>"), int64(len(chunk))); err != nil {
+		ordered[result.part-1] = result
+		if uploaded != nil {
+			uploaded(result.size)
+		}
+		log.LogUploadProgress(name, result.part, totalParts, result.size)
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+	for _, result := range ordered {
+		if err := nzbGen.AddSegment(result.messageID, result.size); err != nil {
 			return err
 		}
-		tracker.EmitProgress(part, int64(len(chunk)))
-		log.LogUploadProgress(name, part, len(chunks), int64(len(chunk)))
-		offset += int64(len(chunk))
 	}
-	tracker.EmitComplete()
 	return nzbGen.EndFile()
 }
 
-func splitDataIntoChunks(data []byte, size int) [][]byte {
-	chunks := make([][]byte, 0, (len(data)+size-1)/size)
-	for start := 0; start < len(data); start += size {
-		end := start + size
-		if end > len(data) {
-			end = len(data)
+func totalFileSize(paths []string) int64 {
+	var total int64
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil {
+			total += info.Size()
 		}
-		chunks = append(chunks, data[start:end])
 	}
-	return chunks
+	return total
 }
 
 func renderSubject(pattern, name string, index, total int, size int64) string {

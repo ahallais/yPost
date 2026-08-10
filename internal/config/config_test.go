@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadConfigDefaults(t *testing.T) {
@@ -41,5 +42,29 @@ func TestLegacySplittingSizeOverridesPostingSize(t *testing.T) {
 	}
 	if cfg.Posting.MaxPartSize != 2*1024*1024 {
 		t.Fatalf("MaxPartSize = %d", cfg.Posting.MaxPartSize)
+	}
+}
+
+func TestLegacyConnectionsMapsToServerMaxConnections(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte("nntp:\n  server: news.example\n  connections: 5\nposting:\n  group: alt.binaries.test\n")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.NNTP.Servers[0].MaxConns; got != 5 {
+		t.Fatalf("MaxConns = %d, want 5", got)
+	}
+	server := cfg.NNTP.Servers[0]
+	if server.ConnectTimeout != 30*time.Second || server.CommandTimeout != 30*time.Second || server.PostTimeout != 120*time.Second {
+		t.Fatalf("unexpected timeout defaults: connect=%v command=%v post=%v",
+			server.ConnectTimeout, server.CommandTimeout, server.PostTimeout)
+	}
+	if server.ReconnectDelay != 15*time.Second || server.RequestRetries != 5 || server.PostRetries != 1 {
+		t.Fatalf("unexpected retry defaults: delay=%v request=%d post=%d",
+			server.ReconnectDelay, server.RequestRetries, server.PostRetries)
 	}
 }
