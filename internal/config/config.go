@@ -122,6 +122,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("output.output_dir", "output")
 	v.SetDefault("output.nzb_dir", "output/nzb")
 	v.SetDefault("output.log_dir", "output/logs")
+	v.SetDefault("output.keep_temp_files", false)
 
 	// Par2 defaults
 	v.SetDefault("par2.redundancy", 10)
@@ -267,6 +268,7 @@ func CreateSampleConfig(configPath string) error {
 	sampleConfig.Output.OutputDir = "output"
 	sampleConfig.Output.NZBDir = "output/nzb"
 	sampleConfig.Output.LogDir = "output/logs"
+	sampleConfig.Output.KeepTempFiles = false
 
 	// Splitting configuration
 	// Par2 configuration

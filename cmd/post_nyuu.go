@@ -32,7 +32,7 @@ var (
 	outputDir, nzbDir                       string
 	maxPartSize                             int64
 	maxLineLen, redundancy                  int
-	createPAR2, createSFV                   bool
+	createPAR2, createSFV, keepTempFiles    bool
 )
 
 func init() {
@@ -56,6 +56,7 @@ come from config.yaml and explicitly supplied flags override them.`
 	f.IntVar(&redundancy, "redundancy", 0, "PAR2 redundancy percentage")
 	f.StringVarP(&outputDir, "output", "o", "", "output directory")
 	f.StringVar(&nzbDir, "nzb-dir", "", "NZB output directory")
+	f.BoolVar(&keepTempFiles, "keep-temp-files", false, "keep split, SFV, and PAR2 files after a successful upload")
 }
 
 func runPostNyuu(cmd *cobra.Command, args []string) error {
@@ -231,6 +232,20 @@ func runPostNyuu(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("finalize NZB: %w", err)
 	}
 	closed = true
+	if !cfg.Output.KeepTempFiles {
+		artifacts := make([]string, 0, len(partPaths)+len(par2Files)+1)
+		artifacts = append(artifacts, partPaths...)
+		if sfvPath != "" {
+			artifacts = append(artifacts, sfvPath)
+		}
+		artifacts = append(artifacts, par2Files...)
+		if err := cleanupUploadArtifacts(artifacts); err != nil {
+			return fmt.Errorf("clean up temporary upload files (NZB retained at %s): %w", nzbPath, err)
+		}
+		// Remove the per-upload working directory when cleanup left it empty.
+		// Ignore a non-empty directory, including when it contains the NZB.
+		_ = os.Remove(workDir)
+	}
 	log.Info("Posting completed successfully; NZB: %s", nzbPath)
 	return nil
 }
@@ -289,6 +304,27 @@ func applyPostOverrides(cmd *cobra.Command, cfg *models.Config) {
 	if f.Changed("nzb-dir") {
 		cfg.Output.NZBDir = nzbDir
 	}
+	if f.Changed("keep-temp-files") {
+		cfg.Output.KeepTempFiles = keepTempFiles
+	}
+}
+
+func cleanupUploadArtifacts(paths []string) error {
+	removed := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		cleanPath := filepath.Clean(path)
+		if _, exists := removed[cleanPath]; exists {
+			continue
+		}
+		removed[cleanPath] = struct{}{}
+		if err := os.Remove(cleanPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s: %w", cleanPath, err)
+		}
+	}
+	return nil
 }
 
 func filePartPaths(parts []*models.FilePart) []string {

@@ -80,6 +80,7 @@ output:
   output_dir: "output"
   nzb_dir: "output/nzb"
   log_dir: "output/logs"
+  keep_temp_files: false
 
 logging:
   level: "info"
@@ -107,6 +108,10 @@ NZBs are written to a temporary file in the destination directory and
 atomically renamed into place only after every article succeeds. Temporary NZB
 output is removed when posting fails.
 
+After a successful upload, generated split, SFV, and PAR2 files are removed by
+default. The completed NZB is always retained. Set `output.keep_temp_files` to
+`true`, or pass `--keep-temp-files`, to retain the generated upload files.
+
 The subject template supports `Filename`, `Index`, `Total`, `ChunkIndex`,
 `TotalChunks`, and `Size`, using Go template syntax as shown above.
 
@@ -132,6 +137,7 @@ setting only when that flag is explicitly supplied:
 | `--redundancy` | int | PAR2 recovery percentage (0–100) | `par2.redundancy` / 10 |
 | `-o, --output` | string | Working/output directory | `output.output_dir` |
 | `--nzb-dir` | string | Final NZB directory | `output.nzb_dir` |
+| `--keep-temp-files` | bool | Keep split, SFV, and PAR2 files after success | `output.keep_temp_files` / false |
 
 Boolean features can be disabled explicitly:
 

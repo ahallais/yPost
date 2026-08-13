@@ -34,9 +34,10 @@ type Config struct {
 		CustomHeaders   map[string]string `mapstructure:"custom_headers"`
 	} `mapstructure:"posting"`
 	Output struct {
-		OutputDir string `mapstructure:"output_dir"`
-		NZBDir    string `mapstructure:"nzb_dir"`
-		LogDir    string `mapstructure:"log_dir"`
+		OutputDir     string `mapstructure:"output_dir"`
+		NZBDir        string `mapstructure:"nzb_dir"`
+		LogDir        string `mapstructure:"log_dir"`
+		KeepTempFiles bool   `mapstructure:"keep_temp_files"`
 	} `mapstructure:"output"`
 	Splitting struct {
 		MaxFileSize string `mapstructure:"max_file_size"`

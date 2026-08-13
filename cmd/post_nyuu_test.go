@@ -28,6 +28,65 @@ func TestPostingOrderKeepsOneReleaseInRecommendedOrder(t *testing.T) {
 	}
 }
 
+func TestCleanupUploadArtifactsRetainsNZB(t *testing.T) {
+	dir := t.TempDir()
+	artifacts := []string{
+		filepath.Join(dir, "release.001"),
+		filepath.Join(dir, "release.sfv"),
+		filepath.Join(dir, "release.par2"),
+	}
+	nzbPath := filepath.Join(dir, "release.nzb")
+	for _, path := range append(append([]string{}, artifacts...), nzbPath) {
+		if err := os.WriteFile(path, []byte("test"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cleanupUploadArtifacts(artifacts); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range artifacts {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("temporary artifact still exists: %s", path)
+		}
+	}
+	if _, err := os.Stat(nzbPath); err != nil {
+		t.Fatalf("NZB was not retained: %v", err)
+	}
+}
+
+func TestKeepTempFilesFlagOverridesConfig(t *testing.T) {
+	flag := rootCmd.Flags().Lookup("keep-temp-files")
+	if flag == nil {
+		t.Fatal("--keep-temp-files flag is not registered")
+	}
+	originalValue := flag.Value.String()
+	originalChanged := flag.Changed
+	t.Cleanup(func() {
+		_ = flag.Value.Set(originalValue)
+		flag.Changed = originalChanged
+	})
+
+	for _, test := range []struct {
+		flagValue   string
+		configValue bool
+		want        bool
+	}{
+		{flagValue: "true", configValue: false, want: true},
+		{flagValue: "false", configValue: true, want: false},
+	} {
+		if err := flag.Value.Set(test.flagValue); err != nil {
+			t.Fatal(err)
+		}
+		flag.Changed = true
+		cfg := validTestConfig()
+		cfg.Output.KeepTempFiles = test.configValue
+		applyPostOverrides(rootCmd, cfg)
+		if cfg.Output.KeepTempFiles != test.want {
+			t.Fatalf("--keep-temp-files=%s resulted in %t, want %t", test.flagValue, cfg.Output.KeepTempFiles, test.want)
+		}
+	}
+}
+
 func TestRenderSubject(t *testing.T) {
 	got := renderSubject(`{{.Filename}} yEnc ({{.ChunkIndex}}/{{.TotalChunks}})`, "release.001", 2, 7, 42)
 	if got != "release.001 yEnc (2/7)" {
