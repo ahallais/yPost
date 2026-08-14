@@ -117,6 +117,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("posting.max_line_length", 128)
 	v.SetDefault("posting.max_part_size", 768000)
 	v.SetDefault("posting.max_article_size", 768000)
+	v.SetDefault("posting.target_bytes_per_connection", 0)
 
 	// Output defaults
 	v.SetDefault("output.output_dir", "output")
@@ -150,8 +151,11 @@ func validateConfig(config *models.Config) error {
 		if server.Port <= 0 || server.Port > 65535 {
 			return fmt.Errorf("server %d: invalid port %d", i+1, server.Port)
 		}
-		if server.MaxConns <= 0 || server.MaxConns > 50 {
+		if server.MaxConns <= 0 {
 			server.MaxConns = 4 // Default
+		}
+		if server.MaxConns > 50 {
+			return fmt.Errorf("server %d: max_connections must not exceed 50", i+1)
 		}
 		if server.ConnectTimeout < 0 || server.CommandTimeout < 0 || server.PostTimeout < 0 || server.ReconnectDelay < 0 {
 			return fmt.Errorf("server %d: timeout and delay values cannot be negative", i+1)
@@ -171,6 +175,10 @@ func validateConfig(config *models.Config) error {
 
 	if config.Posting.MaxArticleSize <= 0 {
 		return fmt.Errorf("max article size must be positive")
+	}
+
+	if config.Posting.TargetBytesPerConnection < 0 {
+		return fmt.Errorf("target bytes per connection cannot be negative")
 	}
 
 	if config.Posting.MaxLineLength <= 0 {
@@ -263,6 +271,7 @@ func CreateSampleConfig(configPath string) error {
 	sampleConfig.Posting.MaxLineLength = 128
 	sampleConfig.Posting.MaxPartSize = 768000
 	sampleConfig.Posting.MaxArticleSize = 768000
+	sampleConfig.Posting.TargetBytesPerConnection = 8 * sampleConfig.Posting.MaxArticleSize
 
 	// Output configuration
 	sampleConfig.Output.OutputDir = "output"

@@ -160,6 +160,30 @@ func TestConnectionPoolConnectAllReportsProgress(t *testing.T) {
 	}
 }
 
+func TestConnectionPoolStreamsFirstConnectionBeforeOpeningRest(t *testing.T) {
+	pool := NewConnectionPool(&models.ServerConfig{}, 2)
+	allowSecond := make(chan struct{})
+	created := 0
+	pool.newClient = func(config *models.ServerConfig) *Client {
+		created++
+		if created == 2 {
+			<-allowSecond
+		}
+		return &Client{config: config, connected: true}
+	}
+
+	results := pool.ConnectSequentially(context.Background(), nil)
+	first := <-results
+	if first.Err != nil || first.Client == nil {
+		t.Fatalf("first connection result = %+v", first)
+	}
+	close(allowSecond)
+	second := <-results
+	if second.Err != nil || second.Client == nil {
+		t.Fatalf("second connection result = %+v", second)
+	}
+}
+
 type servedArticle struct {
 	messageID string
 	err       error

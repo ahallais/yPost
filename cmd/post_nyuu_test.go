@@ -228,6 +228,49 @@ func TestPostNyuuFileStreamsConcurrentlyAndWritesOrderedNZB(t *testing.T) {
 	}
 }
 
+func TestPostNyuuFileLetsNewPosterJoinInProgress(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "release.001")
+	data := []byte(strings.Repeat("article-data-", 20))
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := validTestConfig()
+	cfg.Posting.MaxArticleSize = 32
+	cfg.Posting.SubjectTemplate = "{{.Index}}"
+	state := &recordingPostState{
+		activeByPoster: make(map[int]int),
+		maxByPoster:    make(map[int]int),
+	}
+	first := &recordingPoster{id: 1, state: state}
+	second := &recordingPoster{id: 2, state: state}
+	arrivals := make(chan posterArrival, 1)
+	arrivals <- posterArrival{poster: second}
+	close(arrivals)
+
+	nzbGen, err := nzb.NewNyuuGenerator(filepath.Join(dir, "release.nzb"), "poster")
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, err := logger.New(filepath.Join(dir, "logs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+
+	posters, err := postNyuuFileWithDynamicPosters([]articlePoster{first}, arrivals, path, cfg, nzbGen, log, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(posters) != 2 {
+		t.Fatalf("available posters = %d, want 2", len(posters))
+	}
+	if state.maxActive < 2 {
+		t.Fatalf("maximum concurrent posts = %d, new poster did not join the active file", state.maxActive)
+	}
+}
+
 type cancellingPostState struct {
 	started   atomic.Int64
 	cancelled atomic.Int64

@@ -28,8 +28,22 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.Posting.MaxPartSize != 768000 || cfg.Posting.MaxArticleSize != 768000 {
 		t.Fatalf("unexpected posting sizes: part=%d article=%d", cfg.Posting.MaxPartSize, cfg.Posting.MaxArticleSize)
 	}
+	if cfg.Posting.TargetBytesPerConnection != 0 {
+		t.Fatalf("target bytes per connection = %d, want automatic default", cfg.Posting.TargetBytesPerConnection)
+	}
 	if cfg.Output.KeepTempFiles {
 		t.Fatal("temporary upload files should not be kept by default")
+	}
+}
+
+func TestLoadConfigRejectsMaxConnectionsAboveLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte("nntp:\n  servers:\n    - host: news.example\n      port: 563\n      max_connections: 60\nposting:\n  group: alt.binaries.test\n")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadConfig(path); err == nil {
+		t.Fatal("expected max_connections validation error")
 	}
 }
 

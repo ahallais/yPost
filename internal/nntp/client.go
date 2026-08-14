@@ -23,15 +23,16 @@ const (
 
 // Client represents an NNTP client connection
 type Client struct {
-	conn      net.Conn
-	reader    *textproto.Reader
-	writer    *textproto.Writer
-	config    *models.ServerConfig
-	connected bool
-	mu        sync.Mutex
-	postMu    sync.Mutex
-	reconnect func() error
-	retryHook func(RetryEvent)
+	conn         net.Conn
+	reader       *textproto.Reader
+	writer       *textproto.Writer
+	config       *models.ServerConfig
+	connected    bool
+	mu           sync.Mutex
+	postMu       sync.Mutex
+	reconnect    func() error
+	retryHook    func(RetryEvent)
+	sessionCache tls.ClientSessionCache
 }
 
 // RetryEvent describes a bounded retry before it happens.
@@ -61,6 +62,12 @@ func (c *Client) SetRetryHook(hook func(RetryEvent)) {
 
 // Connect establishes connection to the NNTP server
 func (c *Client) Connect() error {
+	return c.ConnectContext(context.Background())
+}
+
+// ConnectContext establishes a connection and lets cancellation interrupt the
+// dial, TLS handshake, and welcome-message read.
+func (c *Client) ConnectContext(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -70,36 +77,39 @@ func (c *Client) Connect() error {
 
 	address := fmt.Sprintf("%s:%d", c.config.Host, c.config.Port)
 
-	var conn net.Conn
-	var err error
-
 	dialer := &net.Dialer{Timeout: c.config.ConnectTimeout}
-	if c.config.SSL {
-		conn, err = tls.DialWithDialer(dialer, "tcp", address, &tls.Config{
-			ServerName: c.config.Host,
-		})
-	} else {
-		conn, err = dialer.Dial("tcp", address)
-	}
-
+	rawConn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
 		return fmt.Errorf("failed to connect to %s: %w", address, err)
+	}
+	var conn net.Conn = rawConn
+	if c.config.SSL {
+		tlsConn := tls.Client(rawConn, &tls.Config{
+			ServerName:         c.config.Host,
+			ClientSessionCache: c.sessionCache,
+		})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = rawConn.Close()
+			return fmt.Errorf("failed to connect to %s: %w", address, err)
+		}
+		conn = tlsConn
 	}
 
 	c.conn = conn
 	c.reader = textproto.NewReader(bufio.NewReader(conn))
 	c.writer = textproto.NewWriter(bufio.NewWriterSize(conn, uploadWriteBufferSize))
-	if c.config.CommandTimeout > 0 {
-		_ = conn.SetDeadline(time.Now().Add(c.config.CommandTimeout))
-	}
+	stopDeadline := c.setCommandDeadline(ctx, conn)
 
 	// Read welcome message
 	_, _, err = c.reader.ReadCodeLine(200)
+	stopDeadline()
 	if err != nil {
-		c.conn.Close()
+		_ = c.conn.Close()
+		if ctx.Err() != nil {
+			return fmt.Errorf("failed to read welcome message: %w", ctx.Err())
+		}
 		return fmt.Errorf("failed to read welcome message: %w", err)
 	}
-	_ = conn.SetDeadline(time.Time{})
 
 	c.connected = true
 	return nil
@@ -107,13 +117,17 @@ func (c *Client) Connect() error {
 
 // Authenticate performs authentication with the server
 func (c *Client) Authenticate() error {
+	return c.AuthenticateContext(context.Background())
+}
+
+// AuthenticateContext authenticates and interrupts command I/O when ctx is
+// cancelled.
+func (c *Client) AuthenticateContext(ctx context.Context) error {
 	if c.config.Username == "" || c.config.Password == "" {
 		return nil // No authentication required
 	}
-	if c.config.CommandTimeout > 0 {
-		_ = c.conn.SetDeadline(time.Now().Add(c.config.CommandTimeout))
-		defer c.conn.SetDeadline(time.Time{})
-	}
+	stopDeadline := c.setCommandDeadline(ctx, c.conn)
+	defer stopDeadline()
 
 	// Send AUTHINFO USER
 	err := c.writer.PrintfLine("AUTHINFO USER %s", c.config.Username)
@@ -138,6 +152,23 @@ func (c *Client) Authenticate() error {
 	}
 
 	return nil
+}
+
+func (c *Client) setCommandDeadline(ctx context.Context, conn net.Conn) func() {
+	if c.config.CommandTimeout > 0 {
+		_ = conn.SetDeadline(time.Now().Add(c.config.CommandTimeout))
+	}
+	deadlineSet := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = conn.SetDeadline(time.Now())
+		close(deadlineSet)
+	})
+	return func() {
+		if !stop() {
+			<-deadlineSet
+		}
+		_ = conn.SetDeadline(time.Time{})
+	}
 }
 
 // PostArticle posts an article to the specified newsgroup
@@ -564,21 +595,30 @@ func (c *Client) IsConnected() bool {
 
 // ConnectionPool manages multiple NNTP connections
 type ConnectionPool struct {
-	clients   []*Client
-	config    *models.ServerConfig
-	maxConns  int
-	current   int
-	newClient func(*models.ServerConfig) *Client
-	mu        sync.Mutex
+	clients      []*Client
+	config       *models.ServerConfig
+	maxConns     int
+	current      int
+	newClient    func(*models.ServerConfig) *Client
+	sessionCache tls.ClientSessionCache
+	mu           sync.Mutex
+}
+
+// ConnectionResult reports one serially established connection or the error
+// that stopped connection creation.
+type ConnectionResult struct {
+	Client *Client
+	Err    error
 }
 
 // NewConnectionPool creates a new connection pool
 func NewConnectionPool(config *models.ServerConfig, maxConns int) *ConnectionPool {
 	return &ConnectionPool{
-		config:    config,
-		maxConns:  maxConns,
-		clients:   make([]*Client, 0, maxConns),
-		newClient: NewClient,
+		config:       config,
+		maxConns:     maxConns,
+		clients:      make([]*Client, 0, maxConns),
+		newClient:    NewClient,
+		sessionCache: tls.NewLRUClientSessionCache(maxConns),
 	}
 }
 
@@ -593,27 +633,70 @@ func (p *ConnectionPool) ConnectAll() ([]*Client, error) {
 // each completed connection. Connections are intentionally opened
 // sequentially to keep TLS handshakes inexpensive on small NAS systems.
 func (p *ConnectionPool) ConnectAllWithProgress(progress func(completed, total int)) ([]*Client, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	for len(p.clients) < p.maxConns {
-		client := p.newClient(p.config)
-		if err := client.Connect(); err != nil {
-			return nil, err
-		}
-		if err := client.Authenticate(); err != nil {
-			_ = client.Quit()
-			return nil, err
-		}
-		p.clients = append(p.clients, client)
-		if progress != nil {
-			progress(len(p.clients), p.maxConns)
+	for result := range p.ConnectSequentially(context.Background(), progress) {
+		if result.Err != nil {
+			return nil, result.Err
 		}
 	}
 
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	clients := make([]*Client, len(p.clients))
 	copy(clients, p.clients)
 	return clients, nil
+}
+
+// ConnectSequentially opens and authenticates connections one at a time, but
+// publishes each client immediately so callers can begin useful work while
+// later TLS handshakes are still in progress. Cancelling ctx stops connection
+// creation and interrupts an active dial, handshake, or authentication.
+func (p *ConnectionPool) ConnectSequentially(ctx context.Context, progress func(completed, total int)) <-chan ConnectionResult {
+	results := make(chan ConnectionResult, p.maxConns)
+	go func() {
+		defer close(results)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			p.mu.Lock()
+			if len(p.clients) >= p.maxConns {
+				p.mu.Unlock()
+				return
+			}
+			client := p.newClient(p.config)
+			client.sessionCache = p.sessionCache
+			p.mu.Unlock()
+
+			if err := client.ConnectContext(ctx); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				results <- ConnectionResult{Err: err}
+				return
+			}
+			if err := client.AuthenticateContext(ctx); err != nil {
+				_ = client.Quit()
+				if ctx.Err() != nil {
+					return
+				}
+				results <- ConnectionResult{Err: err}
+				return
+			}
+
+			p.mu.Lock()
+			p.clients = append(p.clients, client)
+			completed := len(p.clients)
+			p.mu.Unlock()
+			if progress != nil {
+				progress(completed, p.maxConns)
+			}
+			results <- ConnectionResult{Client: client}
+		}
+	}()
+	return results
 }
 
 // GetClient returns an available client from the pool
@@ -624,6 +707,7 @@ func (p *ConnectionPool) GetClient() (*Client, error) {
 	// Create new client if we haven't reached max connections
 	if len(p.clients) < p.maxConns {
 		client := p.newClient(p.config)
+		client.sessionCache = p.sessionCache
 		err := client.Connect()
 		if err != nil {
 			return nil, err

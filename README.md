@@ -62,6 +62,7 @@ posting:
   subject_template: '"{{.Filename}}" yEnc ({{.Index}}/{{.Total}})'
   max_part_size: 768000
   max_article_size: 768000
+  target_bytes_per_connection: 6144000
   max_line_length: 128
   custom_headers: {}
 
@@ -90,8 +91,13 @@ logging:
 For compatibility, the legacy single-server `nntp.server` form and
 `posting.newsgroup` are also accepted. The legacy `splitting.max_file_size`
 setting, when present, takes precedence over `posting.max_part_size`.
-For a server entry, `max_connections` controls the number of concurrent NNTP
+For a server entry, `max_connections` is the ceiling for concurrent NNTP
 article workers; legacy single-server configurations use `nntp.connections`.
+Before connecting, yPost sizes the final SFV, PAR2, and data-file workload and
+reduces the worker count when the upload is too small to justify every
+configured connection. The default target is eight articles of work per
+connection. Set `posting.target_bytes_per_connection` to override that target
+in bytes; `0` or an omitted value selects the eight-article default.
 Each worker owns one connection and buffers at most one
 `posting.max_article_size` chunk, keeping upload memory bounded independently
 of the physical split-file size. yEnc output streams directly into the bounded
@@ -102,7 +108,9 @@ Code `441` responses use the independent `post_retries` limit. Retry attempts
 are logged, and a Message-ID returned by the server replaces the submitted ID
 in the NZB. On Linux, yPost reads `MemAvailable` before connecting and reduces
 the requested connection count when the estimated yEnc worker memory would
-consume more than half of available memory.
+consume more than half of available memory. Connections are still opened and
+authenticated serially to avoid a TLS/CPU spike, but posting starts as soon as
+the first connection is ready and later connections join the active file.
 
 NZBs are written to a temporary file in the destination directory and
 atomically renamed into place only after every article succeeds. Temporary NZB

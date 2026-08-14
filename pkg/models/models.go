@@ -22,16 +22,17 @@ type Config struct {
 		PostRetries    int            `mapstructure:"post_retries"`
 	} `mapstructure:"nntp"`
 	Posting struct {
-		Group           string            `mapstructure:"group"`
-		Newsgroup       string            `mapstructure:"newsgroup"`
-		From            string            `mapstructure:"from"`
-		PosterName      string            `mapstructure:"poster_name"`
-		PosterEmail     string            `mapstructure:"poster_email"`
-		SubjectTemplate string            `mapstructure:"subject_template"`
-		MaxLineLength   int               `mapstructure:"max_line_length"`
-		MaxPartSize     int64             `mapstructure:"max_part_size"`
-		MaxArticleSize  int64             `mapstructure:"max_article_size"`
-		CustomHeaders   map[string]string `mapstructure:"custom_headers"`
+		Group                    string            `mapstructure:"group"`
+		Newsgroup                string            `mapstructure:"newsgroup"`
+		From                     string            `mapstructure:"from"`
+		PosterName               string            `mapstructure:"poster_name"`
+		PosterEmail              string            `mapstructure:"poster_email"`
+		SubjectTemplate          string            `mapstructure:"subject_template"`
+		MaxLineLength            int               `mapstructure:"max_line_length"`
+		MaxPartSize              int64             `mapstructure:"max_part_size"`
+		MaxArticleSize           int64             `mapstructure:"max_article_size"`
+		TargetBytesPerConnection int64             `mapstructure:"target_bytes_per_connection"`
+		CustomHeaders            map[string]string `mapstructure:"custom_headers"`
 	} `mapstructure:"posting"`
 	Output struct {
 		OutputDir     string `mapstructure:"output_dir"`
