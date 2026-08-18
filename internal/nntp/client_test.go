@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/textproto"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -673,5 +674,24 @@ func TestPostArticleContextExtractsServerMessageIDFromDuplicateResponse(t *testi
 	}
 	if messageID != "<existing-msgid@test>" {
 		t.Fatalf("returned Message-ID = %q, want <existing-msgid@test>", messageID)
+	}
+}
+
+func TestGenerateMessageIDFormatAndUniqueness(t *testing.T) {
+	c := &Client{}
+	const idPattern = `^<[A-Za-z]{24}-\d{13}@nyuu>$`
+	re := regexp.MustCompile(idPattern)
+
+	const count = 2000
+	seen := make(map[string]bool, count)
+	for i := 0; i < count; i++ {
+		id := c.generateMessageID()
+		if !re.MatchString(id) {
+			t.Fatalf("generateMessageID() = %q, want match of %s", id, idPattern)
+		}
+		if seen[id] {
+			t.Fatalf("generateMessageID() produced duplicate id %q after %d calls", id, i)
+		}
+		seen[id] = true
 	}
 }

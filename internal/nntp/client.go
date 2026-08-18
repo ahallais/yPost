@@ -3,6 +3,7 @@ package nntp
 import (
 	"bufio"
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -362,11 +363,23 @@ func (c *Client) generateMessageID() string {
 	// Match the Node.js format: random chars + '-' + timestamp + '@nyuu'.
 	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 	timestamp := fmt.Sprintf("%013d", time.Now().UnixNano()/1000000)
-	var randomChars strings.Builder
-	for i := 0; i < 24; i++ {
-		randomChars.WriteByte(chars[time.Now().UnixNano()%int64(len(chars))])
+
+	// Duplicate-in-history responses are now treated as a successful post
+	// (see isDuplicateArticleError), so a collision between two distinct
+	// articles would silently drop one of them instead of failing loudly.
+	// crypto/rand keeps collisions negligible even with many concurrent
+	// upload workers minting IDs at the same instant.
+	randomBytes := make([]byte, 24)
+	if _, err := cryptorand.Read(randomBytes); err != nil {
+		for i := range randomBytes {
+			randomBytes[i] = byte(time.Now().UnixNano())
+		}
 	}
-	return fmt.Sprintf("<%s-%s@nyuu>", randomChars.String()[:24], timestamp)
+	randomChars := make([]byte, 24)
+	for i, b := range randomBytes {
+		randomChars[i] = chars[int(b)%len(chars)]
+	}
+	return fmt.Sprintf("<%s-%s@nyuu>", string(randomChars), timestamp)
 }
 
 func isTransportError(err error) bool {
