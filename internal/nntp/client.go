@@ -210,6 +210,12 @@ func (c *Client) PostArticleStreamContext(ctx context.Context, group string, sub
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
+		if isDuplicateArticleError(err) {
+			if duplicateID := duplicateResponseMessageID(err); duplicateID != "" {
+				messageID = duplicateID
+			}
+			return messageID, nil
+		}
 		if isPostRejection(err) && postRetries < c.postRetryLimit() {
 			postRetries++
 			c.emitRetry(RetryEvent{Kind: "post rejection", Attempt: postRetries, Maximum: c.postRetryLimit(), Err: err})
@@ -371,6 +377,37 @@ func isTransportError(err error) bool {
 func isPostRejection(err error) bool {
 	var protocolError *textproto.Error
 	return errors.As(err, &protocolError) && protocolError.Code == 441
+}
+
+func isDuplicateArticleError(err error) bool {
+	var protocolError *textproto.Error
+	if !errors.As(err, &protocolError) {
+		return false
+	}
+	if protocolError.Code != 435 && protocolError.Code != 441 {
+		return false
+	}
+
+	msg := strings.ToLower(protocolError.Msg)
+	return strings.Contains(msg, "already exists in history") ||
+		strings.Contains(msg, "already in history") ||
+		strings.Contains(msg, "article already exists") ||
+		strings.Contains(msg, "duplicate article") ||
+		strings.Contains(msg, "duplicate message-id") ||
+		strings.Contains(msg, "duplicate messageid")
+}
+
+func duplicateResponseMessageID(err error) string {
+	if err == nil {
+		return ""
+	}
+	var protocolError *textproto.Error
+	if errors.As(err, &protocolError) {
+		if id := responseMessageIDFromText(protocolError.Msg); id != "" {
+			return id
+		}
+	}
+	return responseMessageIDFromText(err.Error())
 }
 
 func responseMessageIDFromText(response string) string {

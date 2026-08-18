@@ -455,3 +455,223 @@ func TestPostArticleContextUsesServerReturnedMessageID(t *testing.T) {
 		t.Fatalf("returned Message-ID = %q", messageID)
 	}
 }
+
+func TestPostArticleContextTreatsDuplicateInHistoryAsSuccess(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	c := &Client{
+		conn:      clientConn,
+		reader:    textproto.NewReader(bufio.NewReader(clientConn)),
+		writer:    textproto.NewWriter(bufio.NewWriter(clientConn)),
+		connected: true,
+	}
+	result := make(chan servedArticle, 1)
+	go func() {
+		result <- serveArticle(serverConn, "441 Article posting failed (posting error: article rejected: 435 Already exists in history)\r\n")
+	}()
+
+	messageID, err := c.PostArticleContext(context.Background(), "alt.test", "subject", "poster", "body\r\n", nil)
+	if err != nil {
+		t.Fatalf("expected duplicate in history to succeed, got error: %v", err)
+	}
+	served := <-result
+	if served.err != nil {
+		t.Fatal(served.err)
+	}
+	if messageID != served.messageID {
+		t.Fatalf("returned Message-ID = %q, want %q", messageID, served.messageID)
+	}
+}
+
+func TestPostArticleContextTreats435DuplicateAsSuccess(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	c := &Client{
+		conn:      clientConn,
+		reader:    textproto.NewReader(bufio.NewReader(clientConn)),
+		writer:    textproto.NewWriter(bufio.NewWriter(clientConn)),
+		connected: true,
+	}
+	result := make(chan servedArticle, 1)
+	go func() {
+		result <- serveArticle(serverConn, "435 Duplicate article\r\n")
+	}()
+
+	messageID, err := c.PostArticleContext(context.Background(), "alt.test", "subject", "poster", "body\r\n", nil)
+	if err != nil {
+		t.Fatalf("expected 435 duplicate to succeed, got error: %v", err)
+	}
+	served := <-result
+	if served.err != nil {
+		t.Fatal(served.err)
+	}
+	if messageID != served.messageID {
+		t.Fatalf("returned Message-ID = %q, want %q", messageID, served.messageID)
+	}
+}
+
+func TestPostArticleContextDoesNotTreatGeneric435AsSuccess(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	c := &Client{
+		conn:      clientConn,
+		reader:    textproto.NewReader(bufio.NewReader(clientConn)),
+		writer:    textproto.NewWriter(bufio.NewWriter(clientConn)),
+		connected: true,
+	}
+	result := make(chan servedArticle, 1)
+	go func() {
+		result <- serveArticle(serverConn, "435 Article not wanted\r\n")
+	}()
+
+	_, err := c.PostArticleContext(context.Background(), "alt.test", "subject", "poster", "body\r\n", nil)
+	if err == nil {
+		t.Fatal("expected generic 435 rejection to fail")
+	}
+	if served := <-result; served.err != nil {
+		t.Fatal(served.err)
+	}
+}
+
+func TestPostArticleContextDoesNotTreatUnrelatedDuplicateAsSuccess(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	c := &Client{
+		conn:      clientConn,
+		reader:    textproto.NewReader(bufio.NewReader(clientConn)),
+		writer:    textproto.NewWriter(bufio.NewWriter(clientConn)),
+		connected: true,
+	}
+	result := make(chan servedArticle, 1)
+	go func() {
+		result <- serveArticle(serverConn, "441 Article rejected: duplicate header\r\n")
+	}()
+
+	_, err := c.PostArticleContext(context.Background(), "alt.test", "subject", "poster", "body\r\n", nil)
+	if err == nil {
+		t.Fatal("expected unrelated duplicate rejection to fail")
+	}
+	if served := <-result; served.err != nil {
+		t.Fatal(served.err)
+	}
+}
+
+func TestPostArticleContextDoesNotTreatGenericAlreadyExistsAsSuccess(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	c := &Client{
+		conn:      clientConn,
+		reader:    textproto.NewReader(bufio.NewReader(clientConn)),
+		writer:    textproto.NewWriter(bufio.NewWriter(clientConn)),
+		connected: true,
+	}
+	result := make(chan servedArticle, 1)
+	go func() {
+		result <- serveArticle(serverConn, "441 Newsgroup already exists\r\n")
+	}()
+
+	_, err := c.PostArticleContext(context.Background(), "alt.test", "subject", "poster", "body\r\n", nil)
+	if err == nil {
+		t.Fatal("expected unrelated already-exists rejection to fail")
+	}
+	if served := <-result; served.err != nil {
+		t.Fatal(served.err)
+	}
+}
+
+func TestPostArticleContextReconnectFollowedByDuplicateInHistory(t *testing.T) {
+	firstClient, firstServer := net.Pipe()
+	secondClient, secondServer := net.Pipe()
+	defer firstClient.Close()
+	defer firstServer.Close()
+	defer secondClient.Close()
+	defer secondServer.Close()
+	c := &Client{
+		conn:      firstClient,
+		reader:    textproto.NewReader(bufio.NewReader(firstClient)),
+		writer:    textproto.NewWriter(bufio.NewWriter(firstClient)),
+		connected: true,
+	}
+	var reconnects int
+	var retryEvents []RetryEvent
+	c.SetRetryHook(func(event RetryEvent) {
+		retryEvents = append(retryEvents, event)
+	})
+	c.reconnect = func() error {
+		reconnects++
+		c.mu.Lock()
+		c.conn = secondClient
+		c.reader = textproto.NewReader(bufio.NewReader(secondClient))
+		c.writer = textproto.NewWriter(bufio.NewWriter(secondClient))
+		c.connected = true
+		c.mu.Unlock()
+		return nil
+	}
+
+	firstResult := make(chan servedArticle, 1)
+	go func() {
+		// First attempt receives article, then drops connection (simulating TCP reset by peer)
+		result := serveArticle(firstServer, "")
+		firstResult <- result
+		_ = firstServer.Close()
+	}()
+	secondResult := make(chan servedArticle, 1)
+	go func() {
+		// Second attempt rejects with 441/435 already exists in history because the first attempt was stored
+		secondResult <- serveArticle(secondServer, "441 Article posting failed (posting error: article rejected: 435 Already exists in history)\r\n")
+	}()
+
+	messageID, err := c.PostArticleContext(context.Background(), "alt.test", "subject", "poster", "body\r\n", nil)
+	if err != nil {
+		t.Fatalf("expected successful post on reconnect duplicate, got: %v", err)
+	}
+	first := <-firstResult
+	second := <-secondResult
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	if second.err != nil {
+		t.Fatal(second.err)
+	}
+	if reconnects != 1 {
+		t.Fatalf("reconnects = %d, want 1", reconnects)
+	}
+	if len(retryEvents) != 1 || retryEvents[0].Kind != "connection failure" || retryEvents[0].Attempt != 1 {
+		t.Fatalf("retry events = %#v", retryEvents)
+	}
+	if first.messageID != messageID || second.messageID != messageID {
+		t.Fatalf("message IDs differ: first=%q second=%q returned=%q", first.messageID, second.messageID, messageID)
+	}
+}
+
+func TestPostArticleContextExtractsServerMessageIDFromDuplicateResponse(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	c := &Client{
+		conn:      clientConn,
+		reader:    textproto.NewReader(bufio.NewReader(clientConn)),
+		writer:    textproto.NewWriter(bufio.NewWriter(clientConn)),
+		connected: true,
+	}
+	result := make(chan servedArticle, 1)
+	go func() {
+		result <- serveArticle(serverConn, "441 <existing-msgid@test> Duplicate article\r\n")
+	}()
+
+	messageID, err := c.PostArticleContext(context.Background(), "alt.test", "subject", "poster", "body\r\n", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if served := <-result; served.err != nil {
+		t.Fatal(served.err)
+	}
+	if messageID != "<existing-msgid@test>" {
+		t.Fatalf("returned Message-ID = %q, want <existing-msgid@test>", messageID)
+	}
+}

@@ -104,9 +104,12 @@ of the physical split-file size. yEnc output streams directly into the bounded
 network buffer instead of constructing a complete encoded article. If a
 connection is reset or reaches EOF while posting, that worker reconnects and
 retries the article up to `request_retries` times with the same Message-ID.
-Code `441` responses use the independent `post_retries` limit. Retry attempts
-are logged, and a Message-ID returned by the server replaces the submitted ID
-in the NZB. On Linux, yPost reads `MemAvailable` before connecting and reduces
+Code `441` responses use the independent `post_retries` limit. Explicit article
+history and Message-ID duplicate rejections (such as `441 Already exists in
+history`) are recognized as successful uploads since the article was already
+accepted by the server. Retry attempts are logged, and a Message-ID returned by
+the server replaces the submitted ID in the NZB. On Linux, yPost reads
+`MemAvailable` before connecting and reduces
 the requested connection count when the estimated yEnc worker memory would
 consume more than half of available memory. Connections are still opened and
 authenticated serially to avoid a TLS/CPU spike, but posting starts as soon as
